@@ -1,0 +1,29 @@
+{
+  "name": "trendforge-telegram-bot",
+  "version": "1.0.0",
+  "description": "AI-powered Telegram bot that monitors GitHub Trending & Hacker News, generates personalized project ideas",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Evan1108-Coder/TrendForge-Telegram-Bot.git"
+  },
+  "keywords": [],
+  "author": "Evan Lu",
+  "license": "MIT",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Evan1108-Coder/TrendForge-Telegram-Bot/issues"
+  },
+  "homepage": "https://github.com/Evan1108-Coder/TrendForge-Telegram-Bot#readme",
+  "dependencies": {
+    "axios": "^1.16.1",
+    "cheerio": "^1.2.0",
+    "dotenv": "^17.4.2",
+    "grammy": "^1.43.0",
+    "node-cron": "^4.2.1"
+  }
+}
