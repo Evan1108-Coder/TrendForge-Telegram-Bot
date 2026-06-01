@@ -29,7 +29,7 @@ const PROVIDERS = {
     },
   },
   minimax: {
-    url: 'https://api.minimaxi.chat/v1/text/chatcompletion_v2',
+    url: 'https://api.minimaxi.chat/v1/chat/completions',
     models: ['minimax-m2.7', 'minimax-m2.5-lightning'],
     authHeader: key => ({ Authorization: `Bearer ${key}` }),
     envKey: 'MINIMAX_API_KEY',
@@ -65,7 +65,8 @@ async function callOpenAICompatible(url, headers, model, messages, modelMap) {
     max_tokens: 4096,
     temperature: 0.7,
   }, { headers: { 'Content-Type': 'application/json', ...headers }, timeout: 120000 });
-  return res.data.choices[0].message.content;
+  const content = res.data.choices[0].message.content;
+  return content.replace(/<think>[\s\S]*?<\/think>\s*/g, '').trim();
 }
 
 async function callAnthropic(key, model, messages) {

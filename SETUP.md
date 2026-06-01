@@ -75,6 +75,11 @@ Send these commands to your bot:
 
 Or edit `preferences.json` directly.
 
+Your preferences affect what data is fetched:
+- **Languages** — GitHub also fetches trending repos for your preferred languages
+- **Interests** — Dev.to searches articles matching your interest tags
+- **Model** — Used for reports, ideas, conversation, and error explanations
+
 ## pm2 Commands
 
 ```bash

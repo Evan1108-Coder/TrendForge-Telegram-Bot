@@ -26,7 +26,9 @@ async function fetchTopStories(limit = 30) {
     })
   );
 
-  return stories.filter(Boolean).sort((a, b) => b.score - a.score);
+  const result = stories.filter(Boolean).sort((a, b) => b.score - a.score);
+  console.log(`[HackerNews] Fetched ${result.length} top stories`);
+  return result;
 }
 
 module.exports = { fetchTopStories };

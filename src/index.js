@@ -4,30 +4,40 @@ const { startCron } = require('./cron');
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!TOKEN) {
-  console.error('ERROR: TELEGRAM_BOT_TOKEN not set in .env');
+  console.error('[Fatal] TELEGRAM_BOT_TOKEN not set in .env');
   process.exit(1);
 }
 
 async function main() {
-  console.log('🔨 TrendForge starting...');
+  console.log('🔨 TrendForge v2.0 starting...');
   const bot = createBot(TOKEN);
 
   bot.catch((err) => {
-    console.error('Bot error:', err.message);
+    console.error('[Bot] Unhandled error:', err.message);
   });
 
   startCron(bot);
 
   await bot.start({
     onStart: (info) => {
-      console.log(`🔨 TrendForge bot running as @${info.username}`);
-      console.log(`   Model: ${require('./preferences').loadPreferences().model}`);
-      console.log(`   Daily report: 06:00 HKT`);
+      const prefs = require('./preferences').loadPreferences();
+      const { getAvailableModels } = require('./llm/providers');
+      const available = getAvailableModels();
+      console.log(`🔨 TrendForge v2.0 running as @${info.username}`);
+      console.log(`   Model: ${prefs.model}`);
+      console.log(`   Available models: ${available.length}`);
+      console.log(`   Sources: GitHub, HN, Reddit, Product Hunt, Dev.to`);
+      console.log(`   Daily report: ${prefs.dailyReportTime} ${prefs.timezone}`);
+      if (process.env.TELEGRAM_CHAT_ID) {
+        console.log(`   Auto-report chat: ${process.env.TELEGRAM_CHAT_ID}`);
+      } else {
+        console.log(`   ⚠️  TELEGRAM_CHAT_ID not set — daily auto-reports disabled`);
+      }
     },
   });
 }
 
 main().catch(err => {
-  console.error('Fatal error:', err);
+  console.error('[Fatal]', err);
   process.exit(1);
 });

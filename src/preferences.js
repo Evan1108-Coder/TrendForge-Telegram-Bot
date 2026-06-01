@@ -13,6 +13,9 @@ const DEFAULT_PREFS = {
   model: 'minimax-m2.5-lightning',
   maxGitHubRepos: 10,
   maxHNStories: 10,
+  maxRedditPosts: 10,
+  maxPHProducts: 5,
+  maxDevToArticles: 5,
 };
 
 function loadPreferences() {

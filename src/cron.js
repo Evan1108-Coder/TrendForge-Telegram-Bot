@@ -1,11 +1,9 @@
 const cron = require('node-cron');
 const { generateDailyReport } = require('./report');
-const { loadPreferences } = require('./preferences');
 
 function startCron(bot) {
   const job = cron.schedule('0 6 * * *', async () => {
     console.log('[CRON] Running daily report at 6AM HKT...');
-    const prefs = loadPreferences();
     const chatId = process.env.TELEGRAM_CHAT_ID;
     if (!chatId) {
       console.error('[CRON] No TELEGRAM_CHAT_ID set. Cannot send daily report.');
@@ -14,9 +12,11 @@ function startCron(bot) {
 
     try {
       const report = await generateDailyReport();
-      await bot.api.sendMessage(chatId, report, {}).catch(async () => {
+      try {
+        await bot.api.sendMessage(chatId, report, { parse_mode: 'Markdown' });
+      } catch {
         await bot.api.sendMessage(chatId, report.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, ''));
-      });
+      }
       console.log('[CRON] Daily report sent successfully.');
     } catch (err) {
       console.error('[CRON] Failed to send daily report:', err.message);

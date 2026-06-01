@@ -1,14 +1,18 @@
-# TrendForge Telegram Bot
+# TrendForge Telegram Bot v2.0
 
-AI-powered Telegram bot that monitors GitHub Trending and Hacker News daily, uses LLM to filter and generate personalized project ideas, and sends you a daily briefing.
+AI-powered Telegram bot that monitors **5 data sources** daily — GitHub Trending, Hacker News, Reddit, Product Hunt, and Dev.to — uses LLM to filter and generate personalized project ideas, and sends you a daily briefing.
 
 ## Features
 
-- **Daily Trend Reports** — Automated 6AM HKT briefing combining GitHub Trending + Hacker News
-- **Multi-Model LLM** — Supports 17 models across OpenAI, Anthropic, Google, Together AI, and MiniMax
+- **5 Data Sources** — GitHub Trending, Hacker News, Reddit (programming communities), Product Hunt, and Dev.to
+- **Daily Trend Reports** — Automated 6AM HKT briefing combining all sources with AI analysis
+- **Multi-Model LLM** — Supports 16 models across OpenAI, Anthropic, Google, Together AI, and MiniMax
 - **Natural Conversation** — Chat naturally about tech trends, get project ideas, discuss what's hot
-- **Personalized Filtering** — Set your interests, preferred languages, and idea style
-- **Quick Commands** — Instant access to trending repos, HN stories, and on-demand reports
+- **Personalized Filtering** — Set your interests, preferred languages, and idea style. Scrapers adapt to your preferences
+- **AI Error Explanations** — When something goes wrong, the bot explains what happened and how to fix it
+- **Preference-Aware Scraping** — GitHub fetches trending repos in your preferred languages; Dev.to searches articles matching your interests
+- **Retry with Backoff** — Automatic retries with exponential backoff for resilient data fetching
+- **Quick Commands** — Instant access to any data source on demand
 
 ## Supported Models
 
@@ -25,9 +29,12 @@ AI-powered Telegram bot that monitors GitHub Trending and Hacker News daily, use
 | Command | Description |
 |---------|-------------|
 | `/start` | Welcome message and command list |
-| `/report` | Generate today's AI-powered trend report |
+| `/report` | Generate today's AI-powered trend report (all 5 sources) |
 | `/trending` | Quick view of GitHub trending repos |
 | `/hn` | Quick view of Hacker News top stories |
+| `/reddit` | Hot posts from programming subreddits |
+| `/ph` | Today's Product Hunt launches |
+| `/devto` | Top Dev.to articles |
 | `/prefs` | View your taste profile |
 | `/setinterests` | Set your interests (comma-separated) |
 | `/setlangs` | Set preferred programming languages |
@@ -55,16 +62,21 @@ See [SETUP.md](SETUP.md) for detailed installation instructions.
 
 ```
 src/
-  index.js          — Entry point
-  bot.js            — Telegram bot (grammy) with commands and conversation
-  cron.js           — Daily report scheduler (6AM HKT)
-  report.js         — Report generation combining scrapers + LLM
-  preferences.js    — Taste profile management
+  index.js          - Entry point
+  bot.js            - Telegram bot (grammy) with commands and conversation
+  cron.js           - Daily report scheduler (6AM HKT)
+  report.js         - Report generation combining all 5 scrapers + LLM
+  preferences.js    - Taste profile management
   llm/
-    providers.js    — Multi-provider LLM abstraction layer
+    providers.js    - Multi-provider LLM abstraction layer
   scrapers/
-    github.js       — GitHub Trending scraper
-    hackernews.js   — Hacker News API client
+    github.js       - GitHub Trending scraper (preference-aware, multi-language)
+    hackernews.js   - Hacker News Firebase API client
+    reddit.js       - Reddit RSS feed scraper (6 programming subreddits)
+    producthunt.js  - Product Hunt Atom feed scraper
+    devto.js        - Dev.to API client (interest-aware tag queries)
+  utils/
+    retry.js        - Retry with exponential backoff utility
 ```
 
 ## License
