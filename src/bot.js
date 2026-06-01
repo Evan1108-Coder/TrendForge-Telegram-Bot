@@ -37,6 +37,7 @@ function createBot(token) {
   }
 
   bot.command('start', async (ctx) => {
+    console.log(`[START] User: ${ctx.from.first_name} (${ctx.from.id}), Chat ID: ${ctx.chat.id}`);
     await ctx.reply(
       '🔨 *Welcome to TrendForge!*\n\n' +
       'I watch GitHub Trending, Hacker News, Reddit, Product Hunt & Dev.to daily, then use AI to filter and generate personalized project ideas for you.\n\n' +
