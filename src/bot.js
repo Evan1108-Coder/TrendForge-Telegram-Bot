@@ -306,6 +306,7 @@ function createBot(token) {
 
     const prefs = loadPreferences();
     const available = getAvailableModels();
+    const allModels = getAllModels();
     const model = available.includes(prefs.model) ? prefs.model : available[0];
     if (!model) {
       await ctx.reply('❌ No LLM available. Configure at least one API key in .env to chat.');
@@ -316,16 +317,89 @@ function createBot(token) {
     addToHistory(chatId, 'user', text);
     const history = getHistory(chatId);
 
+    const settingsPrompt = `You are TrendForge, a helpful tech trend assistant. You help users discover trending repos, discuss tech news, brainstorm project ideas, and analyze tech trends. You monitor 5 sources: GitHub Trending, Hacker News, Reddit, Product Hunt, and Dev.to. Be concise, insightful, and friendly.
+
+CURRENT USER SETTINGS:
+- Interests: ${JSON.stringify(prefs.interests)}
+- Languages: ${JSON.stringify(prefs.languages)}
+- Avoid topics: ${JSON.stringify(prefs.avoidTopics)}
+- Idea style: "${prefs.ideaStyle}"
+- Model: "${prefs.model}"
+- Max GitHub repos: ${prefs.maxGitHubRepos}
+- Max HN stories: ${prefs.maxHNStories}
+- Max Reddit posts: ${prefs.maxRedditPosts}
+- Max PH products: ${prefs.maxPHProducts}
+- Max Dev.to articles: ${prefs.maxDevToArticles}
+
+SETTINGS MANAGEMENT:
+When the user wants to change their preferences/settings through natural language, you MUST include a JSON block in your response wrapped in [SETTINGS_UPDATE] tags. Only include the fields that are changing.
+
+Available settings fields:
+- interests: array of strings
+- languages: array of strings
+- avoidTopics: array of strings
+- ideaStyle: string (e.g. "practical", "ambitious", "experimental")
+- model: string (must be one of: ${allModels.join(', ')})
+- maxGitHubRepos: number (1-25)
+- maxHNStories: number (1-30)
+- maxRedditPosts: number (1-30)
+- maxPHProducts: number (1-10)
+- maxDevToArticles: number (1-15)
+
+RULES for settings updates:
+- "add X to my interests/languages" → include existing items PLUS the new one
+- "remove X from my interests" → include existing items MINUS that one
+- "set my interests to X, Y, Z" → replace entirely with new list
+- "switch to model X" or "use X" → set model field (match to closest valid model name)
+- "show me more GitHub repos" → increase maxGitHubRepos
+- "I don't want to see blockchain stuff" → add to avoidTopics
+- Always respond conversationally AND include the tag block
+
+Example response when user says "add Rust to my languages and switch to gpt-4o":
+Sure! I've added Rust to your languages and switched your model to gpt-4o. Your reports will now include Rust-specific trending repos too! 🦀
+[SETTINGS_UPDATE]{"languages":["JavaScript","TypeScript","Python","Rust"],"model":"gpt-4o"}[/SETTINGS_UPDATE]
+
+If the message is NOT about changing settings, just respond normally without any tags.`;
+
     try {
       const response = await chat(model, [
-        {
-          role: 'system',
-          content: `You are TrendForge, a helpful tech trend assistant. You help users discover trending repos, discuss tech news, brainstorm project ideas, and analyze tech trends. You monitor 5 sources: GitHub Trending, Hacker News, Reddit, Product Hunt, and Dev.to. Be concise, insightful, and friendly. User interests: ${prefs.interests.join(', ')}. User codes in: ${prefs.languages.join(', ')}.`,
-        },
+        { role: 'system', content: settingsPrompt },
         ...history,
       ]);
-      addToHistory(chatId, 'assistant', response);
-      await sendLongMessage(ctx, response);
+
+      const { cleanResponse, settingsUpdate } = parseSettingsUpdate(response);
+
+      if (settingsUpdate) {
+        try {
+          const updated = updatePreferences(settingsUpdate);
+          console.log('[Bot] Settings updated via natural language:', JSON.stringify(settingsUpdate));
+          const confirmParts = [];
+          if (settingsUpdate.interests) confirmParts.push(`Interests: ${updated.interests.join(', ')}`);
+          if (settingsUpdate.languages) confirmParts.push(`Languages: ${updated.languages.join(', ')}`);
+          if (settingsUpdate.avoidTopics) confirmParts.push(`Avoid: ${updated.avoidTopics.join(', ') || 'nothing'}`);
+          if (settingsUpdate.ideaStyle) confirmParts.push(`Idea style: ${updated.ideaStyle}`);
+          if (settingsUpdate.model) confirmParts.push(`Model: ${updated.model}`);
+          if (settingsUpdate.maxGitHubRepos) confirmParts.push(`GitHub repos: ${updated.maxGitHubRepos}`);
+          if (settingsUpdate.maxHNStories) confirmParts.push(`HN stories: ${updated.maxHNStories}`);
+          if (settingsUpdate.maxRedditPosts) confirmParts.push(`Reddit posts: ${updated.maxRedditPosts}`);
+          if (settingsUpdate.maxPHProducts) confirmParts.push(`PH products: ${updated.maxPHProducts}`);
+          if (settingsUpdate.maxDevToArticles) confirmParts.push(`Dev.to articles: ${updated.maxDevToArticles}`);
+
+          const confirm = confirmParts.length > 0
+            ? `\n\n⚙️ *Settings saved:*\n${confirmParts.map(p => `  • ${p}`).join('\n')}`
+            : '';
+
+          addToHistory(chatId, 'assistant', cleanResponse);
+          await sendLongMessage(ctx, cleanResponse + confirm);
+        } catch (parseErr) {
+          console.error('[Bot] Failed to apply settings:', parseErr.message);
+          addToHistory(chatId, 'assistant', cleanResponse);
+          await sendLongMessage(ctx, cleanResponse);
+        }
+      } else {
+        addToHistory(chatId, 'assistant', cleanResponse);
+        await sendLongMessage(ctx, cleanResponse);
+      }
     } catch (err) {
       console.error('[Bot] Chat error:', err.message);
       await ctx.reply('❌ Sorry, I encountered an error. Try again or check /models.');
@@ -368,6 +442,31 @@ async function sendLongMessage(ctx, text, parseMode) {
 
 function stripMarkdown(text) {
   return text.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '');
+}
+
+function parseSettingsUpdate(response) {
+  const match = response.match(/\[SETTINGS_UPDATE\]([\s\S]*?)\[\/SETTINGS_UPDATE\]/);
+  if (!match) return { cleanResponse: response, settingsUpdate: null };
+
+  const cleanResponse = response
+    .replace(/\[SETTINGS_UPDATE\][\s\S]*?\[\/SETTINGS_UPDATE\]/, '')
+    .trim();
+
+  try {
+    const parsed = JSON.parse(match[1].trim());
+    const allowed = new Set([
+      'interests', 'languages', 'avoidTopics', 'ideaStyle', 'model',
+      'maxGitHubRepos', 'maxHNStories', 'maxRedditPosts', 'maxPHProducts', 'maxDevToArticles',
+    ]);
+    const settingsUpdate = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (allowed.has(key)) settingsUpdate[key] = value;
+    }
+    return { cleanResponse, settingsUpdate: Object.keys(settingsUpdate).length > 0 ? settingsUpdate : null };
+  } catch {
+    console.warn('[Bot] Failed to parse settings JSON from LLM response');
+    return { cleanResponse, settingsUpdate: null };
+  }
 }
 
 module.exports = { createBot };
