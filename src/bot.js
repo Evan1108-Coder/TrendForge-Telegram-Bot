@@ -2,6 +2,7 @@ const { Bot } = require('grammy');
 const { chat, getAllModels, getAvailableModels } = require('./llm/providers');
 const { loadPreferences, updatePreferences } = require('./preferences');
 const { generateDailyReport } = require('./report');
+const { restartCron, scheduleLabel } = require('./cron');
 
 async function explainError(err, context) {
   try {
@@ -55,7 +56,7 @@ function createBot(token) {
       '/devto — Quick Dev.to top articles\n' +
       '/idea — Generate a project idea\n' +
       '/help — Show this help\n\n' +
-      '_Or just chat with me naturally!_',
+      '_Or just chat with me naturally! You can change any setting — interests, model, report schedule, etc. — just by telling me._',
       { parse_mode: 'Markdown' }
     );
   });
@@ -78,7 +79,7 @@ function createBot(token) {
       '/models — List all supported models\n\n' +
       '*Other:*\n' +
       '/idea <topic> — Generate a project idea\n\n' +
-      '_You can also just chat naturally and I\'ll help with tech trends, ideas, and analysis._',
+      '_Chat naturally to change any setting — schedule, interests, model, timezone — or ask about tech trends, ideas, and analysis._',
       { parse_mode: 'Markdown' }
     );
   });
@@ -196,13 +197,15 @@ function createBot(token) {
 
   bot.command('prefs', async (ctx) => {
     const prefs = loadPreferences();
+    const schedule = scheduleLabel(prefs);
     const msg = `⚙️ *Your Preferences*\n\n` +
       `*Interests:* ${prefs.interests.join(', ')}\n` +
       `*Languages:* ${prefs.languages.join(', ')}\n` +
       `*Avoid:* ${prefs.avoidTopics.length ? prefs.avoidTopics.join(', ') : 'nothing'}\n` +
       `*Idea Style:* ${prefs.ideaStyle}\n` +
-      `*Model:* ${prefs.model}\n` +
-      `*Report Time:* ${prefs.dailyReportTime} (${prefs.timezone})\n\n` +
+      `*Model:* ${prefs.model}\n\n` +
+      `*Report Schedule:* ${schedule}\n` +
+      `*Timezone:* ${prefs.timezone}\n\n` +
       `*Source Limits:*\n` +
       `  GitHub: ${prefs.maxGitHubRepos} | HN: ${prefs.maxHNStories}\n` +
       `  Reddit: ${prefs.maxRedditPosts} | PH: ${prefs.maxPHProducts} | Dev.to: ${prefs.maxDevToArticles}`;
@@ -317,6 +320,7 @@ function createBot(token) {
     addToHistory(chatId, 'user', text);
     const history = getHistory(chatId);
 
+    const scheduleDesc = scheduleLabel(prefs);
     const settingsPrompt = `You are TrendForge, a helpful tech trend assistant. You help users discover trending repos, discuss tech news, brainstorm project ideas, and analyze tech trends. You monitor 5 sources: GitHub Trending, Hacker News, Reddit, Product Hunt, and Dev.to. Be concise, insightful, and friendly.
 
 CURRENT USER SETTINGS:
@@ -325,6 +329,10 @@ CURRENT USER SETTINGS:
 - Avoid topics: ${JSON.stringify(prefs.avoidTopics)}
 - Idea style: "${prefs.ideaStyle}"
 - Model: "${prefs.model}"
+- Report schedule: ${scheduleDesc}
+- Report enabled: ${prefs.reportEnabled !== false}
+- Report cron: "${prefs.reportCron || '0 6 * * *'}"
+- Timezone: "${prefs.timezone}"
 - Max GitHub repos: ${prefs.maxGitHubRepos}
 - Max HN stories: ${prefs.maxHNStories}
 - Max Reddit posts: ${prefs.maxRedditPosts}
@@ -340,13 +348,32 @@ Available settings fields:
 - avoidTopics: array of strings
 - ideaStyle: string (e.g. "practical", "ambitious", "experimental")
 - model: string (must be one of: ${allModels.join(', ')})
+- reportEnabled: boolean (true to enable auto-reports, false to disable)
+- reportCron: string (a valid 5-field cron expression — minute hour dayOfMonth month dayOfWeek)
+- reportScheduleText: string (human-readable description of the schedule you set)
+- dailyReportTime: string (HH:MM format, update this when the report time changes)
+- timezone: string (IANA timezone, e.g. "Asia/Hong_Kong", "America/New_York")
 - maxGitHubRepos: number (1-25)
 - maxHNStories: number (1-30)
 - maxRedditPosts: number (1-30)
 - maxPHProducts: number (1-10)
 - maxDevToArticles: number (1-15)
 
-RULES for settings updates:
+SCHEDULE RULES:
+When the user changes the report schedule, you MUST set reportCron, reportScheduleText, and (if the time changes) dailyReportTime. Cron format: "minute hour dayOfMonth month dayOfWeek" (5 fields, no seconds).
+- "stop daily reports" / "turn off reports" → set reportEnabled to false
+- "turn reports back on" / "resume reports" → set reportEnabled to true
+- "send reports at 8pm" → reportCron: "0 20 * * *", reportScheduleText: "Daily at 20:00", dailyReportTime: "20:00"
+- "every Monday" → reportCron: "0 6 * * 1", reportScheduleText: "Every Monday at 06:00" (keep current time)
+- "every Tuesday and Friday at 9am" → reportCron: "0 9 * * 2,5", reportScheduleText: "Every Tuesday and Friday at 09:00", dailyReportTime: "09:00"
+- "on the 2nd of every month" → reportCron: "0 6 2 * *", reportScheduleText: "Monthly on the 2nd at 06:00"
+- "every weekday" → reportCron: "0 6 * * 1-5", reportScheduleText: "Every weekday at 06:00"
+- "twice a day at 8am and 6pm" → reportCron: "0 8,18 * * *", reportScheduleText: "Twice daily at 08:00 and 18:00"
+- "every 2 hours" → reportCron: "0 */2 * * *", reportScheduleText: "Every 2 hours"
+- When changing only frequency but not time, preserve the current time in the cron.
+- When changing only time but not frequency, preserve the current frequency pattern.
+
+OTHER SETTINGS RULES:
 - "add X to my interests/languages" → include existing items PLUS the new one
 - "remove X from my interests" → include existing items MINUS that one
 - "set my interests to X, Y, Z" → replace entirely with new list
@@ -355,9 +382,13 @@ RULES for settings updates:
 - "I don't want to see blockchain stuff" → add to avoidTopics
 - Always respond conversationally AND include the tag block
 
-Example response when user says "add Rust to my languages and switch to gpt-4o":
-Sure! I've added Rust to your languages and switched your model to gpt-4o. Your reports will now include Rust-specific trending repos too! 🦀
-[SETTINGS_UPDATE]{"languages":["JavaScript","TypeScript","Python","Rust"],"model":"gpt-4o"}[/SETTINGS_UPDATE]
+Example response when user says "send me reports every Monday and Thursday at 9am":
+Done! I've updated your report schedule to every Monday and Thursday at 9AM. You'll get your trend digest twice a week now! 📅
+[SETTINGS_UPDATE]{"reportCron":"0 9 * * 1,4","reportScheduleText":"Every Monday and Thursday at 09:00","dailyReportTime":"09:00"}[/SETTINGS_UPDATE]
+
+Example response when user says "stop giving me daily reports":
+Got it, I've turned off the automatic reports. You can still use /report anytime to get a fresh report on demand. Just let me know when you want to turn them back on! 🔕
+[SETTINGS_UPDATE]{"reportEnabled":false}[/SETTINGS_UPDATE]
 
 If the message is NOT about changing settings, just respond normally without any tags.`;
 
@@ -373,12 +404,23 @@ If the message is NOT about changing settings, just respond normally without any
         try {
           const updated = updatePreferences(settingsUpdate);
           console.log('[Bot] Settings updated via natural language:', JSON.stringify(settingsUpdate));
+
+          const scheduleFields = ['reportEnabled', 'reportCron', 'reportScheduleText', 'dailyReportTime', 'timezone'];
+          const hasScheduleChange = scheduleFields.some(f => f in settingsUpdate);
+          if (hasScheduleChange) {
+            restartCron();
+            console.log('[Bot] Cron restarted after schedule change');
+          }
+
           const confirmParts = [];
           if (settingsUpdate.interests) confirmParts.push(`Interests: ${updated.interests.join(', ')}`);
           if (settingsUpdate.languages) confirmParts.push(`Languages: ${updated.languages.join(', ')}`);
           if (settingsUpdate.avoidTopics) confirmParts.push(`Avoid: ${updated.avoidTopics.join(', ') || 'nothing'}`);
           if (settingsUpdate.ideaStyle) confirmParts.push(`Idea style: ${updated.ideaStyle}`);
           if (settingsUpdate.model) confirmParts.push(`Model: ${updated.model}`);
+          if ('reportEnabled' in settingsUpdate) confirmParts.push(`Reports: ${updated.reportEnabled ? 'enabled' : 'disabled'}`);
+          if (settingsUpdate.reportScheduleText) confirmParts.push(`Schedule: ${updated.reportScheduleText}`);
+          if (settingsUpdate.timezone) confirmParts.push(`Timezone: ${updated.timezone}`);
           if (settingsUpdate.maxGitHubRepos) confirmParts.push(`GitHub repos: ${updated.maxGitHubRepos}`);
           if (settingsUpdate.maxHNStories) confirmParts.push(`HN stories: ${updated.maxHNStories}`);
           if (settingsUpdate.maxRedditPosts) confirmParts.push(`Reddit posts: ${updated.maxRedditPosts}`);
@@ -456,6 +498,7 @@ function parseSettingsUpdate(response) {
     const parsed = JSON.parse(match[1].trim());
     const allowed = new Set([
       'interests', 'languages', 'avoidTopics', 'ideaStyle', 'model',
+      'reportEnabled', 'reportCron', 'reportScheduleText', 'dailyReportTime', 'timezone',
       'maxGitHubRepos', 'maxHNStories', 'maxRedditPosts', 'maxPHProducts', 'maxDevToArticles',
     ]);
     const settingsUpdate = {};

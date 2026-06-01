@@ -22,16 +22,18 @@ async function main() {
     onStart: (info) => {
       const prefs = require('./preferences').loadPreferences();
       const { getAvailableModels } = require('./llm/providers');
+      const { scheduleLabel } = require('./cron');
       const available = getAvailableModels();
-      console.log(`🔨 TrendForge v2.0 running as @${info.username}`);
+      console.log(`🔨 TrendForge v2.1 running as @${info.username}`);
       console.log(`   Model: ${prefs.model}`);
       console.log(`   Available models: ${available.length}`);
       console.log(`   Sources: GitHub, HN, Reddit, Product Hunt, Dev.to`);
-      console.log(`   Daily report: ${prefs.dailyReportTime} ${prefs.timezone}`);
+      console.log(`   Report schedule: ${scheduleLabel(prefs)}`);
+      console.log(`   Timezone: ${prefs.timezone}`);
       if (process.env.TELEGRAM_CHAT_ID) {
         console.log(`   Auto-report chat: ${process.env.TELEGRAM_CHAT_ID}`);
       } else {
-        console.log(`   ⚠️  TELEGRAM_CHAT_ID not set — daily auto-reports disabled`);
+        console.log(`   ⚠️  TELEGRAM_CHAT_ID not set — auto-reports disabled`);
       }
     },
   });
