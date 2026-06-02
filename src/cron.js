@@ -19,9 +19,9 @@ async function sendReport(bot) {
   try {
     const report = await generateDailyReport();
     try {
-      await bot.api.sendMessage(chatId, report, { parse_mode: 'Markdown' });
+      await bot.api.sendMessage(chatId, report, { parse_mode: 'HTML' });
     } catch {
-      await bot.api.sendMessage(chatId, report.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, ''));
+      await bot.api.sendMessage(chatId, report.replace(/<[^>]+>/g, ''));
     }
     console.log('[CRON] Report sent successfully.');
   } catch (err) {

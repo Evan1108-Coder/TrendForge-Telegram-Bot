@@ -40,9 +40,9 @@ function createBot(token) {
   bot.command('start', async (ctx) => {
     console.log(`[START] User: ${ctx.from.first_name} (${ctx.from.id}), Chat ID: ${ctx.chat.id}`);
     await ctx.reply(
-      '🔨 *Welcome to TrendForge!*\n\n' +
-      'I watch GitHub Trending, Hacker News, Reddit, Product Hunt & Dev.to daily, then use AI to filter and generate personalized project ideas for you.\n\n' +
-      '*Commands:*\n' +
+      '🔨 <b>Welcome to TrendForge!</b>\n\n' +
+      'I watch GitHub Trending, Hacker News, Reddit, Product Hunt &amp; Dev.to daily, then use AI to filter and generate personalized project ideas for you.\n\n' +
+      '<b>Commands:</b>\n' +
       '/report — Get today\'s trend report now\n' +
       '/prefs — View your taste profile\n' +
       '/setinterests — Set your interests\n' +
@@ -56,31 +56,31 @@ function createBot(token) {
       '/devto — Quick Dev.to top articles\n' +
       '/idea — Generate a project idea\n' +
       '/help — Show this help\n\n' +
-      '_Or just chat with me naturally! You can change any setting — interests, model, report schedule, etc. — just by telling me._',
-      { parse_mode: 'Markdown' }
+      '<i>Or just chat with me naturally! You can change any setting — interests, model, report schedule, etc. — just by telling me.</i>',
+      { parse_mode: 'HTML' }
     );
   });
 
   bot.command('help', async (ctx) => {
     await ctx.reply(
-      '🔨 *TrendForge Commands*\n\n' +
-      '*Data Sources:*\n' +
+      '🔨 <b>TrendForge Commands</b>\n\n' +
+      '<b>Data Sources:</b>\n' +
       '/report — Generate today\'s AI-powered trend report\n' +
       '/trending — Raw GitHub trending repos\n' +
       '/hn — Raw Hacker News top stories\n' +
       '/reddit — Reddit hot posts (programming)\n' +
       '/ph — Product Hunt launches today\n' +
       '/devto — Dev.to top articles\n\n' +
-      '*Preferences:*\n' +
+      '<b>Preferences:</b>\n' +
       '/prefs — View current preferences\n' +
-      '/setinterests <comma-separated> — Update interests\n' +
-      '/setlangs <comma-separated> — Update languages\n' +
-      '/setmodel <model> — Change LLM model\n' +
+      '/setinterests &lt;comma-separated&gt; — Update interests\n' +
+      '/setlangs &lt;comma-separated&gt; — Update languages\n' +
+      '/setmodel &lt;model&gt; — Change LLM model\n' +
       '/models — List all supported models\n\n' +
-      '*Other:*\n' +
-      '/idea <topic> — Generate a project idea\n\n' +
-      '_Chat naturally to change any setting — schedule, interests, model, timezone — or ask about tech trends, ideas, and analysis._',
-      { parse_mode: 'Markdown' }
+      '<b>Other:</b>\n' +
+      '/idea &lt;topic&gt; — Generate a project idea\n\n' +
+      '<i>Chat naturally to change any setting — schedule, interests, model, timezone — or ask about tech trends, ideas, and analysis.</i>',
+      { parse_mode: 'HTML' }
     );
   });
 
@@ -88,7 +88,7 @@ function createBot(token) {
     await ctx.reply('⏳ Generating your daily report from 5 sources... This may take a moment.');
     try {
       const report = await generateDailyReport();
-      await sendLongMessage(ctx, report);
+      await sendLongMessage(ctx, report, 'HTML');
     } catch (err) {
       console.error('[Bot] Report generation failed:', err);
       await ctx.reply(await explainError(err, 'generating your trend report'));
@@ -104,11 +104,11 @@ function createBot(token) {
         await ctx.reply('No trending repos found right now.');
         return;
       }
-      let msg = '📦 *GitHub Trending Today*\n\n';
+      let msg = '📦 <b>GitHub Trending Today</b>\n\n';
       repos.slice(0, 15).forEach((r, i) => {
-        msg += `${i + 1}. *${r.name}* (${r.language})\n   ${r.description}\n   ⭐ ${r.totalStars} | ${r.starsToday}\n\n`;
+        msg += `${i + 1}. <b>${escapeHtml(r.name)}</b> (${escapeHtml(r.language)})\n   ${escapeHtml(r.description)}\n   ⭐ ${r.totalStars} | ${r.starsToday}\n\n`;
       });
-      await sendLongMessage(ctx, msg, 'Markdown');
+      await sendLongMessage(ctx, msg, 'HTML');
     } catch (err) {
       console.error('[Bot] Trending fetch error:', err);
       await ctx.reply(await explainError(err, 'fetching GitHub trending repos'));
@@ -124,11 +124,11 @@ function createBot(token) {
         await ctx.reply('No stories found right now.');
         return;
       }
-      let msg = '📰 *Hacker News Top Stories*\n\n';
+      let msg = '📰 <b>Hacker News Top Stories</b>\n\n';
       stories.forEach((s, i) => {
-        msg += `${i + 1}. *${s.title}*\n   🔗 ${s.url}\n   👆 ${s.score} pts | 💬 ${s.comments}\n\n`;
+        msg += `${i + 1}. <b>${escapeHtml(s.title)}</b>\n   🔗 ${escapeHtml(s.url)}\n   👆 ${s.score} pts | 💬 ${s.comments}\n\n`;
       });
-      await sendLongMessage(ctx, msg, 'Markdown');
+      await sendLongMessage(ctx, msg, 'HTML');
     } catch (err) {
       console.error('[Bot] HN fetch error:', err);
       await ctx.reply(await explainError(err, 'fetching Hacker News stories'));
@@ -144,11 +144,11 @@ function createBot(token) {
         await ctx.reply('No Reddit posts found right now.');
         return;
       }
-      let msg = '🤖 *Reddit Hot Posts*\n\n';
+      let msg = '🤖 <b>Reddit Hot Posts</b>\n\n';
       posts.slice(0, 15).forEach((p, i) => {
-        msg += `${i + 1}. *r/${p.subreddit}* — ${p.title}\n   👆 ${p.score} | 💬 ${p.comments}\n\n`;
+        msg += `${i + 1}. <b>r/${escapeHtml(p.subreddit)}</b> — ${escapeHtml(p.title)}\n   👆 ${p.score} | 💬 ${p.comments}\n\n`;
       });
-      await sendLongMessage(ctx, msg, 'Markdown');
+      await sendLongMessage(ctx, msg, 'HTML');
     } catch (err) {
       console.error('[Bot] Reddit fetch error:', err);
       await ctx.reply(await explainError(err, 'fetching Reddit posts'));
@@ -164,11 +164,11 @@ function createBot(token) {
         await ctx.reply('No Product Hunt launches found right now.');
         return;
       }
-      let msg = '🚀 *Product Hunt Today*\n\n';
+      let msg = '🚀 <b>Product Hunt Today</b>\n\n';
       products.slice(0, 10).forEach((p, i) => {
-        msg += `${i + 1}. *${p.name}*\n   ${p.tagline}\n   👆 ${p.votes} upvotes\n\n`;
+        msg += `${i + 1}. <b>${escapeHtml(p.name)}</b>\n   ${escapeHtml(p.tagline)}\n   👆 ${p.votes} upvotes\n\n`;
       });
-      await sendLongMessage(ctx, msg, 'Markdown');
+      await sendLongMessage(ctx, msg, 'HTML');
     } catch (err) {
       console.error('[Bot] Product Hunt fetch error:', err);
       await ctx.reply(await explainError(err, 'fetching Product Hunt launches'));
@@ -184,11 +184,11 @@ function createBot(token) {
         await ctx.reply('No Dev.to articles found right now.');
         return;
       }
-      let msg = '📝 *Dev.to Top Articles*\n\n';
+      let msg = '📝 <b>Dev.to Top Articles</b>\n\n';
       articles.slice(0, 10).forEach((a, i) => {
-        msg += `${i + 1}. *${a.title}*\n   by ${a.author} | ❤️ ${a.reactions} | 💬 ${a.comments} | ${a.readingTime}min\n   Tags: ${a.tags.join(', ') || 'none'}\n\n`;
+        msg += `${i + 1}. <b>${escapeHtml(a.title)}</b>\n   by ${escapeHtml(a.author)} | ❤️ ${a.reactions} | 💬 ${a.comments} | ${a.readingTime}min\n   Tags: ${escapeHtml(a.tags.join(', ') || 'none')}\n\n`;
       });
-      await sendLongMessage(ctx, msg, 'Markdown');
+      await sendLongMessage(ctx, msg, 'HTML');
     } catch (err) {
       console.error('[Bot] Dev.to fetch error:', err);
       await ctx.reply(await explainError(err, 'fetching Dev.to articles'));
@@ -198,18 +198,18 @@ function createBot(token) {
   bot.command('prefs', async (ctx) => {
     const prefs = loadPreferences();
     const schedule = scheduleLabel(prefs);
-    const msg = `⚙️ *Your Preferences*\n\n` +
-      `*Interests:* ${prefs.interests.join(', ')}\n` +
-      `*Languages:* ${prefs.languages.join(', ')}\n` +
-      `*Avoid:* ${prefs.avoidTopics.length ? prefs.avoidTopics.join(', ') : 'nothing'}\n` +
-      `*Idea Style:* ${prefs.ideaStyle}\n` +
-      `*Model:* ${prefs.model}\n\n` +
-      `*Report Schedule:* ${schedule}\n` +
-      `*Timezone:* ${prefs.timezone}\n\n` +
-      `*Source Limits:*\n` +
+    const msg = `⚙️ <b>Your Preferences</b>\n\n` +
+      `<b>Interests:</b> ${escapeHtml(prefs.interests.join(', '))}\n` +
+      `<b>Languages:</b> ${escapeHtml(prefs.languages.join(', '))}\n` +
+      `<b>Avoid:</b> ${escapeHtml(prefs.avoidTopics.length ? prefs.avoidTopics.join(', ') : 'nothing')}\n` +
+      `<b>Idea Style:</b> ${escapeHtml(prefs.ideaStyle)}\n` +
+      `<b>Model:</b> ${escapeHtml(prefs.model)}\n\n` +
+      `<b>Report Schedule:</b> ${escapeHtml(schedule)}\n` +
+      `<b>Timezone:</b> ${escapeHtml(prefs.timezone)}\n\n` +
+      `<b>Source Limits:</b>\n` +
       `  GitHub: ${prefs.maxGitHubRepos} | HN: ${prefs.maxHNStories}\n` +
       `  Reddit: ${prefs.maxRedditPosts} | PH: ${prefs.maxPHProducts} | Dev.to: ${prefs.maxDevToArticles}`;
-    await ctx.reply(msg, { parse_mode: 'Markdown' });
+    await ctx.reply(msg, { parse_mode: 'HTML' });
   });
 
   bot.command('setinterests', async (ctx) => {
@@ -239,13 +239,13 @@ function createBot(token) {
     if (!text) {
       const models = getAllModels();
       const available = getAvailableModels();
-      let msg = '🤖 *Available models:*\n\n';
+      let msg = '🤖 <b>Available models:</b>\n\n';
       models.forEach(m => {
         const status = available.includes(m) ? '✅' : '🔒 (no API key)';
-        msg += `• \`${m}\` ${status}\n`;
+        msg += `• <code>${escapeHtml(m)}</code> ${status}\n`;
       });
-      msg += '\nUsage: /setmodel <model-name>';
-      await ctx.reply(msg, { parse_mode: 'Markdown' });
+      msg += '\nUsage: /setmodel &lt;model-name&gt;';
+      await ctx.reply(msg, { parse_mode: 'HTML' });
       return;
     }
     const all = getAllModels();
@@ -261,7 +261,7 @@ function createBot(token) {
     const all = getAllModels();
     const available = getAvailableModels();
     const prefs = loadPreferences();
-    let msg = '🤖 *Supported Models*\n\n';
+    let msg = '🤖 <b>Supported Models</b>\n\n';
     const groups = {
       'OpenAI': all.filter(m => m.startsWith('gpt')),
       'Anthropic': all.filter(m => m.startsWith('claude')),
@@ -270,15 +270,15 @@ function createBot(token) {
       'MiniMax': all.filter(m => m.startsWith('minimax')),
     };
     for (const [group, models] of Object.entries(groups)) {
-      msg += `*${group}:*\n`;
+      msg += `<b>${escapeHtml(group)}:</b>\n`;
       models.forEach(m => {
         const active = m === prefs.model ? ' ← current' : '';
         const status = available.includes(m) ? '✅' : '🔒';
-        msg += `  ${status} \`${m}\`${active}\n`;
+        msg += `  ${status} <code>${escapeHtml(m)}</code>${active}\n`;
       });
       msg += '\n';
     }
-    await ctx.reply(msg, { parse_mode: 'Markdown' });
+    await ctx.reply(msg, { parse_mode: 'HTML' });
   });
 
   bot.command('idea', async (ctx) => {
@@ -293,10 +293,10 @@ function createBot(token) {
     await ctx.reply('💡 Thinking of an idea...');
     try {
       const response = await chat(model, [
-        { role: 'system', content: `You are TrendForge, a creative tech project idea generator. The user likes: ${prefs.interests.join(', ')}. They code in: ${prefs.languages.join(', ')}. Their preferred style: ${prefs.ideaStyle}.` },
-        { role: 'user', content: `Generate a detailed, practical project idea about: ${topic}. Include: project name, what it does, tech stack, key features (3-5), and estimated build time.` },
+        { role: 'system', content: `You are TrendForge, a creative tech project idea generator. The user likes: ${prefs.interests.join(', ')}. They code in: ${prefs.languages.join(', ')}. Their preferred style: ${prefs.ideaStyle}. Always use Telegram HTML formatting (<b>, <i>, <code>) — NEVER use Markdown (*, **, _, #).` },
+        { role: 'user', content: `Generate a detailed, practical project idea about: ${topic}. Include: project name, what it does, tech stack, key features (3-5), and estimated build time. Use HTML formatting: <b>bold</b> for headings, <i>italic</i> for emphasis, <code>code</code> for tech terms.` },
       ]);
-      await sendLongMessage(ctx, `💡 *Project Idea*\n\n${response}`);
+      await sendLongMessage(ctx, `💡 <b>Project Idea</b>\n\n${response}`, 'HTML');
     } catch (err) {
       console.error('[Bot] Idea generation failed:', err);
       await ctx.reply(await explainError(err, 'generating a project idea'));
@@ -322,6 +322,12 @@ function createBot(token) {
 
     const scheduleDesc = scheduleLabel(prefs);
     const settingsPrompt = `You are TrendForge, a helpful tech trend assistant. You help users discover trending repos, discuss tech news, brainstorm project ideas, and analyze tech trends. You monitor 5 sources: GitHub Trending, Hacker News, Reddit, Product Hunt, and Dev.to. Be concise, insightful, and friendly.
+
+FORMATTING RULES (CRITICAL):
+- Use Telegram HTML formatting ONLY: <b>bold</b>, <i>italic</i>, <code>code</code>
+- NEVER use Markdown: no *, no **, no _, no __, no \`, no #, no []()
+- Use <b>bold</b> for emphasis and key terms
+- Use <i>italic</i> for secondary info
 
 CURRENT USER SETTINGS:
 - Interests: ${JSON.stringify(prefs.interests)}
@@ -428,19 +434,19 @@ If the message is NOT about changing settings, just respond normally without any
           if (settingsUpdate.maxDevToArticles) confirmParts.push(`Dev.to articles: ${updated.maxDevToArticles}`);
 
           const confirm = confirmParts.length > 0
-            ? `\n\n⚙️ *Settings saved:*\n${confirmParts.map(p => `  • ${p}`).join('\n')}`
+            ? `\n\n⚙️ <b>Settings saved:</b>\n${confirmParts.map(p => `  • ${p}`).join('\n')}`
             : '';
 
           addToHistory(chatId, 'assistant', cleanResponse);
-          await sendLongMessage(ctx, cleanResponse + confirm);
+          await sendLongMessage(ctx, cleanResponse + confirm, 'HTML');
         } catch (parseErr) {
           console.error('[Bot] Failed to apply settings:', parseErr.message);
           addToHistory(chatId, 'assistant', cleanResponse);
-          await sendLongMessage(ctx, cleanResponse);
+          await sendLongMessage(ctx, cleanResponse, 'HTML');
         }
       } else {
         addToHistory(chatId, 'assistant', cleanResponse);
-        await sendLongMessage(ctx, cleanResponse);
+        await sendLongMessage(ctx, cleanResponse, 'HTML');
       }
     } catch (err) {
       console.error('[Bot] Chat error:', err.message);
@@ -457,7 +463,7 @@ async function sendLongMessage(ctx, text, parseMode) {
     try {
       await ctx.reply(text, parseMode ? { parse_mode: parseMode } : {});
     } catch {
-      await ctx.reply(stripMarkdown(text));
+      await ctx.reply(stripFormatting(text));
     }
     return;
   }
@@ -477,13 +483,18 @@ async function sendLongMessage(ctx, text, parseMode) {
     try {
       await ctx.reply(chunk, parseMode ? { parse_mode: parseMode } : {});
     } catch {
-      await ctx.reply(stripMarkdown(chunk));
+      await ctx.reply(stripFormatting(chunk));
     }
   }
 }
 
-function stripMarkdown(text) {
-  return text.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '');
+function stripFormatting(text) {
+  return text.replace(/<[^>]+>/g, '').replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '');
+}
+
+function escapeHtml(text) {
+  if (!text) return '';
+  return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 function parseSettingsUpdate(response) {
