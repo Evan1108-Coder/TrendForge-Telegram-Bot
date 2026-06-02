@@ -18,16 +18,28 @@ async function sendReport(bot) {
   }
   try {
     const report = await generateDailyReport();
-    try {
-      await bot.api.sendMessage(chatId, report, { parse_mode: 'HTML' });
-    } catch {
-      await bot.api.sendMessage(chatId, report.replace(/<[^>]+>/g, ''));
+    const maxLen = 4000;
+    if (report.length <= maxLen) {
+      await bot.api.sendMessage(chatId, report);
+    } else {
+      let remaining = report;
+      while (remaining.length > 0) {
+        if (remaining.length <= maxLen) {
+          await bot.api.sendMessage(chatId, remaining);
+          break;
+        }
+        let splitAt = remaining.lastIndexOf('\n\n', maxLen);
+        if (splitAt < maxLen * 0.3) splitAt = remaining.lastIndexOf('\n', maxLen);
+        if (splitAt < maxLen * 0.3) splitAt = maxLen;
+        await bot.api.sendMessage(chatId, remaining.substring(0, splitAt));
+        remaining = remaining.substring(splitAt).trimStart();
+      }
     }
     console.log('[CRON] Report sent successfully.');
   } catch (err) {
     console.error('[CRON] Failed to send report:', err.message);
     try {
-      await bot.api.sendMessage(chatId, '⚠️ TrendForge report failed. Check logs.');
+      await bot.api.sendMessage(chatId, 'TrendForge report failed this cycle. Check logs for details.');
     } catch {}
   }
 }

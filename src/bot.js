@@ -1,526 +1,387 @@
 const { Bot } = require('grammy');
 const { chat, getAllModels, getAvailableModels } = require('./llm/providers');
 const { loadPreferences, updatePreferences } = require('./preferences');
-const { generateDailyReport } = require('./report');
 const { restartCron, scheduleLabel } = require('./cron');
-
-async function explainError(err, context) {
-  try {
-    const available = getAvailableModels();
-    const model = available[0];
-    if (!model) return `❌ ${context} failed: ${err.message}`;
-
-    const response = await chat(model, [
-      { role: 'system', content: 'You are a helpful bot error explainer. When something goes wrong, explain clearly what happened and what the user can do about it. Be brief (2-3 sentences max). Be friendly and reassuring.' },
-      { role: 'user', content: `The following error occurred while ${context}: ${err.message}\n\nError type: ${err.constructor.name}\nHTTP status: ${err.response?.status || 'N/A'}\n\nExplain what happened and suggest a fix.` },
-    ]);
-    return `⚠️ ${response}`;
-  } catch {
-    return `❌ ${context} failed: ${err.message}`;
-  }
-}
+const { fetchGitHubTrendingByPrefs } = require('./scrapers/github');
+const { fetchTopStories } = require('./scrapers/hackernews');
+const { fetchRedditHot } = require('./scrapers/reddit');
+const { fetchProductHunt } = require('./scrapers/producthunt');
+const { fetchDevToByInterests } = require('./scrapers/devto');
+const { withRetry } = require('./utils/retry');
+const { cleanOutput, sendLong } = require('./utils/format');
 
 function createBot(token) {
   const bot = new Bot(token);
   const conversationHistory = new Map();
+  const messageQueue = new Map();
+  const processing = new Set();
 
   function getHistory(chatId) {
-    if (!conversationHistory.has(chatId)) {
-      conversationHistory.set(chatId, []);
-    }
+    if (!conversationHistory.has(chatId)) conversationHistory.set(chatId, []);
     return conversationHistory.get(chatId);
   }
 
   function addToHistory(chatId, role, content) {
     const history = getHistory(chatId);
     history.push({ role, content });
-    if (history.length > 20) history.splice(0, history.length - 20);
+    if (history.length > 30) history.splice(0, history.length - 30);
   }
 
   bot.command('start', async (ctx) => {
-    console.log(`[START] User: ${ctx.from.first_name} (${ctx.from.id}), Chat ID: ${ctx.chat.id}`);
+    console.log(`[Bot] /start from ${ctx.from.first_name} (${ctx.from.id}), chat ${ctx.chat.id}`);
     await ctx.reply(
-      '🔨 <b>Welcome to TrendForge!</b>\n\n' +
-      'I watch GitHub Trending, Hacker News, Reddit, Product Hunt &amp; Dev.to daily, then use AI to filter and generate personalized project ideas for you.\n\n' +
-      '<b>Commands:</b>\n' +
-      '/report — Get today\'s trend report now\n' +
-      '/prefs — View your taste profile\n' +
-      '/setinterests — Set your interests\n' +
-      '/setlangs — Set preferred languages\n' +
-      '/setmodel — Change LLM model\n' +
-      '/models — List available models\n' +
-      '/trending — Quick GitHub trending\n' +
-      '/hn — Quick Hacker News top stories\n' +
-      '/reddit — Quick Reddit hot posts\n' +
-      '/ph — Quick Product Hunt today\n' +
-      '/devto — Quick Dev.to top articles\n' +
-      '/idea — Generate a project idea\n' +
-      '/help — Show this help\n\n' +
-      '<i>Or just chat with me naturally! You can change any setting — interests, model, report schedule, etc. — just by telling me.</i>',
-      { parse_mode: 'HTML' }
+      '🔨 Welcome to TrendForge!\n\n' +
+      'I\'m your AI-powered tech trend assistant. I monitor GitHub, Hacker News, Reddit, Product Hunt, and Dev.to to keep you informed about what\'s happening in tech.\n\n' +
+      'Just talk to me naturally! For example:\n' +
+      '- "What\'s trending on GitHub?"\n' +
+      '- "Give me today\'s full report"\n' +
+      '- "Any interesting AI projects lately?"\n' +
+      '- "Generate a project idea about web scraping"\n' +
+      '- "Change my report schedule to every Monday at 9am"\n' +
+      '- "Show me my current settings"\n' +
+      '- "What\'s hot on Hacker News and Reddit?"\n\n' +
+      'I can fetch live data, analyze trends, brainstorm ideas, and manage your settings. Just tell me what you need!'
     );
   });
 
-  bot.command('help', async (ctx) => {
-    await ctx.reply(
-      '🔨 <b>TrendForge Commands</b>\n\n' +
-      '<b>Data Sources:</b>\n' +
-      '/report — Generate today\'s AI-powered trend report\n' +
-      '/trending — Raw GitHub trending repos\n' +
-      '/hn — Raw Hacker News top stories\n' +
-      '/reddit — Reddit hot posts (programming)\n' +
-      '/ph — Product Hunt launches today\n' +
-      '/devto — Dev.to top articles\n\n' +
-      '<b>Preferences:</b>\n' +
-      '/prefs — View current preferences\n' +
-      '/setinterests &lt;comma-separated&gt; — Update interests\n' +
-      '/setlangs &lt;comma-separated&gt; — Update languages\n' +
-      '/setmodel &lt;model&gt; — Change LLM model\n' +
-      '/models — List all supported models\n\n' +
-      '<b>Other:</b>\n' +
-      '/idea &lt;topic&gt; — Generate a project idea\n\n' +
-      '<i>Chat naturally to change any setting — schedule, interests, model, timezone — or ask about tech trends, ideas, and analysis.</i>',
-      { parse_mode: 'HTML' }
-    );
-  });
-
-  bot.command('report', async (ctx) => {
-    await ctx.reply('⏳ Generating your daily report from 5 sources... This may take a moment.');
-    try {
-      const report = await generateDailyReport();
-      await sendLongMessage(ctx, report, 'HTML');
-    } catch (err) {
-      console.error('[Bot] Report generation failed:', err);
-      await ctx.reply(await explainError(err, 'generating your trend report'));
-    }
-  });
-
-  bot.command('trending', async (ctx) => {
-    const { fetchGitHubTrending } = require('./scrapers/github');
-    await ctx.reply('⏳ Fetching GitHub trending...');
-    try {
-      const repos = await fetchGitHubTrending();
-      if (repos.length === 0) {
-        await ctx.reply('No trending repos found right now.');
-        return;
-      }
-      let msg = '📦 <b>GitHub Trending Today</b>\n\n';
-      repos.slice(0, 15).forEach((r, i) => {
-        msg += `${i + 1}. <b>${escapeHtml(r.name)}</b> (${escapeHtml(r.language)})\n   ${escapeHtml(r.description)}\n   ⭐ ${r.totalStars} | ${r.starsToday}\n\n`;
-      });
-      await sendLongMessage(ctx, msg, 'HTML');
-    } catch (err) {
-      console.error('[Bot] Trending fetch error:', err);
-      await ctx.reply(await explainError(err, 'fetching GitHub trending repos'));
-    }
-  });
-
-  bot.command('hn', async (ctx) => {
-    const { fetchTopStories } = require('./scrapers/hackernews');
-    await ctx.reply('⏳ Fetching Hacker News...');
-    try {
-      const stories = await fetchTopStories(15);
-      if (stories.length === 0) {
-        await ctx.reply('No stories found right now.');
-        return;
-      }
-      let msg = '📰 <b>Hacker News Top Stories</b>\n\n';
-      stories.forEach((s, i) => {
-        msg += `${i + 1}. <b>${escapeHtml(s.title)}</b>\n   🔗 ${escapeHtml(s.url)}\n   👆 ${s.score} pts | 💬 ${s.comments}\n\n`;
-      });
-      await sendLongMessage(ctx, msg, 'HTML');
-    } catch (err) {
-      console.error('[Bot] HN fetch error:', err);
-      await ctx.reply(await explainError(err, 'fetching Hacker News stories'));
-    }
-  });
-
-  bot.command('reddit', async (ctx) => {
-    const { fetchRedditHot } = require('./scrapers/reddit');
-    await ctx.reply('⏳ Fetching Reddit hot posts...');
-    try {
-      const posts = await fetchRedditHot();
-      if (posts.length === 0) {
-        await ctx.reply('No Reddit posts found right now.');
-        return;
-      }
-      let msg = '🤖 <b>Reddit Hot Posts</b>\n\n';
-      posts.slice(0, 15).forEach((p, i) => {
-        msg += `${i + 1}. <b>r/${escapeHtml(p.subreddit)}</b> — ${escapeHtml(p.title)}\n   👆 ${p.score} | 💬 ${p.comments}\n\n`;
-      });
-      await sendLongMessage(ctx, msg, 'HTML');
-    } catch (err) {
-      console.error('[Bot] Reddit fetch error:', err);
-      await ctx.reply(await explainError(err, 'fetching Reddit posts'));
-    }
-  });
-
-  bot.command('ph', async (ctx) => {
-    const { fetchProductHunt } = require('./scrapers/producthunt');
-    await ctx.reply('⏳ Fetching Product Hunt...');
-    try {
-      const products = await fetchProductHunt();
-      if (products.length === 0) {
-        await ctx.reply('No Product Hunt launches found right now.');
-        return;
-      }
-      let msg = '🚀 <b>Product Hunt Today</b>\n\n';
-      products.slice(0, 10).forEach((p, i) => {
-        msg += `${i + 1}. <b>${escapeHtml(p.name)}</b>\n   ${escapeHtml(p.tagline)}\n   👆 ${p.votes} upvotes\n\n`;
-      });
-      await sendLongMessage(ctx, msg, 'HTML');
-    } catch (err) {
-      console.error('[Bot] Product Hunt fetch error:', err);
-      await ctx.reply(await explainError(err, 'fetching Product Hunt launches'));
-    }
-  });
-
-  bot.command('devto', async (ctx) => {
-    const { fetchDevToArticles } = require('./scrapers/devto');
-    await ctx.reply('⏳ Fetching Dev.to top articles...');
-    try {
-      const articles = await fetchDevToArticles();
-      if (articles.length === 0) {
-        await ctx.reply('No Dev.to articles found right now.');
-        return;
-      }
-      let msg = '📝 <b>Dev.to Top Articles</b>\n\n';
-      articles.slice(0, 10).forEach((a, i) => {
-        msg += `${i + 1}. <b>${escapeHtml(a.title)}</b>\n   by ${escapeHtml(a.author)} | ❤️ ${a.reactions} | 💬 ${a.comments} | ${a.readingTime}min\n   Tags: ${escapeHtml(a.tags.join(', ') || 'none')}\n\n`;
-      });
-      await sendLongMessage(ctx, msg, 'HTML');
-    } catch (err) {
-      console.error('[Bot] Dev.to fetch error:', err);
-      await ctx.reply(await explainError(err, 'fetching Dev.to articles'));
-    }
-  });
-
-  bot.command('prefs', async (ctx) => {
-    const prefs = loadPreferences();
-    const schedule = scheduleLabel(prefs);
-    const msg = `⚙️ <b>Your Preferences</b>\n\n` +
-      `<b>Interests:</b> ${escapeHtml(prefs.interests.join(', '))}\n` +
-      `<b>Languages:</b> ${escapeHtml(prefs.languages.join(', '))}\n` +
-      `<b>Avoid:</b> ${escapeHtml(prefs.avoidTopics.length ? prefs.avoidTopics.join(', ') : 'nothing')}\n` +
-      `<b>Idea Style:</b> ${escapeHtml(prefs.ideaStyle)}\n` +
-      `<b>Model:</b> ${escapeHtml(prefs.model)}\n\n` +
-      `<b>Report Schedule:</b> ${escapeHtml(schedule)}\n` +
-      `<b>Timezone:</b> ${escapeHtml(prefs.timezone)}\n\n` +
-      `<b>Source Limits:</b>\n` +
-      `  GitHub: ${prefs.maxGitHubRepos} | HN: ${prefs.maxHNStories}\n` +
-      `  Reddit: ${prefs.maxRedditPosts} | PH: ${prefs.maxPHProducts} | Dev.to: ${prefs.maxDevToArticles}`;
-    await ctx.reply(msg, { parse_mode: 'HTML' });
-  });
-
-  bot.command('setinterests', async (ctx) => {
-    const text = ctx.message.text.replace('/setinterests', '').trim();
-    if (!text) {
-      await ctx.reply('Usage: /setinterests AI, web dev, machine learning, ...');
-      return;
-    }
-    const interests = text.split(',').map(s => s.trim()).filter(Boolean);
-    updatePreferences({ interests });
-    await ctx.reply(`✅ Interests updated: ${interests.join(', ')}`);
-  });
-
-  bot.command('setlangs', async (ctx) => {
-    const text = ctx.message.text.replace('/setlangs', '').trim();
-    if (!text) {
-      await ctx.reply('Usage: /setlangs JavaScript, Python, Rust, ...');
-      return;
-    }
-    const languages = text.split(',').map(s => s.trim()).filter(Boolean);
-    updatePreferences({ languages });
-    await ctx.reply(`✅ Languages updated: ${languages.join(', ')}`);
-  });
-
-  bot.command('setmodel', async (ctx) => {
-    const text = ctx.message.text.replace('/setmodel', '').trim();
-    if (!text) {
-      const models = getAllModels();
-      const available = getAvailableModels();
-      let msg = '🤖 <b>Available models:</b>\n\n';
-      models.forEach(m => {
-        const status = available.includes(m) ? '✅' : '🔒 (no API key)';
-        msg += `• <code>${escapeHtml(m)}</code> ${status}\n`;
-      });
-      msg += '\nUsage: /setmodel &lt;model-name&gt;';
-      await ctx.reply(msg, { parse_mode: 'HTML' });
-      return;
-    }
-    const all = getAllModels();
-    if (!all.includes(text)) {
-      await ctx.reply(`❌ Unknown model: ${text}\nUse /models to see available options.`);
-      return;
-    }
-    updatePreferences({ model: text });
-    await ctx.reply(`✅ Model set to: ${text}`);
-  });
-
-  bot.command('models', async (ctx) => {
-    const all = getAllModels();
-    const available = getAvailableModels();
-    const prefs = loadPreferences();
-    let msg = '🤖 <b>Supported Models</b>\n\n';
-    const groups = {
-      'OpenAI': all.filter(m => m.startsWith('gpt')),
-      'Anthropic': all.filter(m => m.startsWith('claude')),
-      'Google': all.filter(m => m.startsWith('gemini')),
-      'Together (Llama)': all.filter(m => m.startsWith('llama')),
-      'MiniMax': all.filter(m => m.startsWith('minimax')),
-    };
-    for (const [group, models] of Object.entries(groups)) {
-      msg += `<b>${escapeHtml(group)}:</b>\n`;
-      models.forEach(m => {
-        const active = m === prefs.model ? ' ← current' : '';
-        const status = available.includes(m) ? '✅' : '🔒';
-        msg += `  ${status} <code>${escapeHtml(m)}</code>${active}\n`;
-      });
-      msg += '\n';
-    }
-    await ctx.reply(msg, { parse_mode: 'HTML' });
-  });
-
-  bot.command('idea', async (ctx) => {
-    const topic = ctx.message.text.replace('/idea', '').trim() || 'something trending today';
-    const prefs = loadPreferences();
-    const available = getAvailableModels();
-    const model = available.includes(prefs.model) ? prefs.model : available[0];
-    if (!model) {
-      await ctx.reply('❌ No LLM model available. Set an API key first.');
-      return;
-    }
-    await ctx.reply('💡 Thinking of an idea...');
-    try {
-      const response = await chat(model, [
-        { role: 'system', content: `You are TrendForge, a creative tech project idea generator. The user likes: ${prefs.interests.join(', ')}. They code in: ${prefs.languages.join(', ')}. Their preferred style: ${prefs.ideaStyle}. Always use Telegram HTML formatting (<b>, <i>, <code>) — NEVER use Markdown (*, **, _, #).` },
-        { role: 'user', content: `Generate a detailed, practical project idea about: ${topic}. Include: project name, what it does, tech stack, key features (3-5), and estimated build time. Use HTML formatting: <b>bold</b> for headings, <i>italic</i> for emphasis, <code>code</code> for tech terms.` },
-      ]);
-      await sendLongMessage(ctx, `💡 <b>Project Idea</b>\n\n${response}`, 'HTML');
-    } catch (err) {
-      console.error('[Bot] Idea generation failed:', err);
-      await ctx.reply(await explainError(err, 'generating a project idea'));
-    }
-  });
-
-  bot.on('message:text', async (ctx) => {
+  bot.on('message:text', (ctx) => {
     const text = ctx.message.text;
-    if (text.startsWith('/')) return;
+    if (text === '/start') return;
+
+    const chatId = ctx.chat.id;
+
+    if (processing.has(chatId)) {
+      if (!messageQueue.has(chatId)) messageQueue.set(chatId, { messages: [], ctx });
+      const queue = messageQueue.get(chatId);
+      queue.messages.push(text);
+      queue.ctx = ctx;
+      return;
+    }
+
+    processing.add(chatId);
+    (async () => {
+      try {
+        await processMessages(ctx, chatId, [text]);
+
+        while (messageQueue.has(chatId) && messageQueue.get(chatId).messages.length > 0) {
+          const queue = messageQueue.get(chatId);
+          const msgs = queue.messages.splice(0);
+          await processMessages(queue.ctx, chatId, msgs);
+        }
+      } catch (err) {
+        console.error('[Bot] Unhandled processing error:', err.message);
+      } finally {
+        processing.delete(chatId);
+        messageQueue.delete(chatId);
+      }
+    })();
+  });
+
+  async function processMessages(ctx, chatId, messages) {
+    const combinedText = messages.length === 1 ? messages[0] : messages.join('\n');
+    addToHistory(chatId, 'user', combinedText);
 
     const prefs = loadPreferences();
     const available = getAvailableModels();
     const allModels = getAllModels();
     const model = available.includes(prefs.model) ? prefs.model : available[0];
+
     if (!model) {
-      await ctx.reply('❌ No LLM available. Configure at least one API key in .env to chat.');
+      await ctx.reply('No AI model available right now. Please check API key configuration.');
       return;
     }
 
-    const chatId = ctx.chat.id;
-    addToHistory(chatId, 'user', text);
     const history = getHistory(chatId);
+    const systemPrompt = buildSystemPrompt(prefs, allModels);
 
-    const scheduleDesc = scheduleLabel(prefs);
-    const settingsPrompt = `You are TrendForge, a helpful tech trend assistant. You help users discover trending repos, discuss tech news, brainstorm project ideas, and analyze tech trends. You monitor 5 sources: GitHub Trending, Hacker News, Reddit, Product Hunt, and Dev.to. Be concise, insightful, and friendly.
+    try {
+      const phase1Response = await chat(model, [
+        { role: 'system', content: systemPrompt },
+        ...history,
+      ]);
 
-FORMATTING RULES (CRITICAL):
-- Use Telegram HTML formatting ONLY: <b>bold</b>, <i>italic</i>, <code>code</code>
-- NEVER use Markdown: no *, no **, no _, no __, no \`, no #, no []()
-- Use <b>bold</b> for emphasis and key terms
-- Use <i>italic</i> for secondary info
+      const parsed = parseResponse(phase1Response);
+
+      if (parsed.settingsUpdate) {
+        applySettings(parsed.settingsUpdate);
+      }
+
+      if (parsed.dataSources.length > 0) {
+        const ack = cleanOutput(parsed.cleanText) || 'Let me fetch that data for you...';
+        await ctx.reply(ack);
+
+        const data = await fetchSources(parsed.dataSources, prefs);
+        const dataText = formatDataForAI(data);
+
+        const phase2Response = await chat(model, [
+          { role: 'system', content: systemPrompt },
+          ...history,
+          { role: 'assistant', content: ack },
+          { role: 'user', content: `[Here is the live data you requested]\n\n${dataText}\n\nNow provide your detailed analysis and response based on this data. Remember: plain text only, no markdown, no HTML. Be detailed and insightful.` },
+        ]);
+
+        const cleaned = cleanOutput(phase2Response) || 'Here\'s what I found — but I had trouble formatting it. Try asking again!';
+        addToHistory(chatId, 'assistant', cleaned);
+        await sendLong(ctx, cleaned);
+      } else {
+        let cleaned = cleanOutput(parsed.cleanText);
+        if (!cleaned && parsed.settingsUpdate) {
+          const parts = [];
+          const su = parsed.settingsUpdate;
+          if (su.interests) parts.push(`Interests: ${su.interests.join(', ')}`);
+          if (su.languages) parts.push(`Languages: ${su.languages.join(', ')}`);
+          if (su.avoidTopics) parts.push(`Avoid: ${su.avoidTopics.join(', ')}`);
+          if (su.ideaStyle) parts.push(`Idea style: ${su.ideaStyle}`);
+          if (su.model) parts.push(`Model: ${su.model}`);
+          if ('reportEnabled' in su) parts.push(`Reports: ${su.reportEnabled ? 'enabled' : 'disabled'}`);
+          if (su.reportScheduleText) parts.push(`Schedule: ${su.reportScheduleText}`);
+          if (su.timezone) parts.push(`Timezone: ${su.timezone}`);
+          cleaned = 'Done! Your settings have been updated:\n' + parts.map(p => `- ${p}`).join('\n');
+        }
+        if (!cleaned) cleaned = 'I\'m not sure how to respond to that. Try asking about tech trends, project ideas, or say "show me my settings"!';
+        addToHistory(chatId, 'assistant', cleaned);
+        await sendLong(ctx, cleaned);
+      }
+    } catch (err) {
+      console.error('[Bot] Error:', err.message);
+      await ctx.reply('Something went wrong processing your request. Please try again or rephrase your question.');
+    }
+  }
+
+  function applySettings(settingsUpdate) {
+    try {
+      updatePreferences(settingsUpdate);
+      console.log('[Bot] Settings updated:', JSON.stringify(settingsUpdate));
+      const scheduleFields = ['reportEnabled', 'reportCron', 'reportScheduleText', 'dailyReportTime', 'timezone'];
+      if (scheduleFields.some(f => f in settingsUpdate)) {
+        restartCron();
+        console.log('[Bot] Cron restarted after schedule change');
+      }
+    } catch (e) {
+      console.error('[Bot] Settings update failed:', e.message);
+    }
+  }
+
+  function buildSystemPrompt(prefs, allModels) {
+    const schedule = scheduleLabel(prefs);
+    return `You are TrendForge, an intelligent tech trend assistant running as a Telegram bot. You help users explore tech trends, discover projects, brainstorm ideas, manage preferences, and have conversations about technology.
+
+YOUR CAPABILITIES:
+You have access to real-time data from 5 sources:
+- GitHub Trending (github): Trending repositories across programming languages
+- Hacker News (hn): Top stories and discussions from the tech community
+- Reddit (reddit): Hot posts from programming communities (r/programming, r/webdev, r/MachineLearning, etc.)
+- Product Hunt (ph): Latest product launches and tools
+- Dev.to (devto): Top developer articles and tutorials
+
+You can:
+- Fetch and analyze data from any combination of these sources
+- Generate comprehensive trend reports combining all sources
+- Brainstorm project ideas based on current trends and user interests
+- Update user preferences (interests, languages, schedule, model, limits, etc.)
+- Discuss tech topics, programming, industry trends, and more
+- Show the user their current configuration and settings
 
 CURRENT USER SETTINGS:
-- Interests: ${JSON.stringify(prefs.interests)}
-- Languages: ${JSON.stringify(prefs.languages)}
-- Avoid topics: ${JSON.stringify(prefs.avoidTopics)}
-- Idea style: "${prefs.ideaStyle}"
-- Model: "${prefs.model}"
-- Report schedule: ${scheduleDesc}
+- Interests: ${prefs.interests.join(', ')}
+- Languages: ${prefs.languages.join(', ')}
+- Avoid topics: ${prefs.avoidTopics.length ? prefs.avoidTopics.join(', ') : 'none'}
+- Idea style: ${prefs.ideaStyle}
+- AI Model: ${prefs.model}
+- Report schedule: ${schedule}
 - Report enabled: ${prefs.reportEnabled !== false}
-- Report cron: "${prefs.reportCron || '0 6 * * *'}"
-- Timezone: "${prefs.timezone}"
-- Max GitHub repos: ${prefs.maxGitHubRepos}
-- Max HN stories: ${prefs.maxHNStories}
-- Max Reddit posts: ${prefs.maxRedditPosts}
-- Max PH products: ${prefs.maxPHProducts}
-- Max Dev.to articles: ${prefs.maxDevToArticles}
+- Timezone: ${prefs.timezone}
+- Source limits: GitHub ${prefs.maxGitHubRepos}, HN ${prefs.maxHNStories}, Reddit ${prefs.maxRedditPosts}, PH ${prefs.maxPHProducts}, Dev.to ${prefs.maxDevToArticles}
 
-SETTINGS MANAGEMENT:
-When the user wants to change their preferences/settings through natural language, you MUST include a JSON block in your response wrapped in [SETTINGS_UPDATE] tags. Only include the fields that are changing.
+REQUESTING DATA:
+If you need live data from any source to answer the user, include this tag at the very end of your message:
+[NEED_DATA:source1,source2,...]
 
-Available settings fields:
+Available source names: github, hn, reddit, ph, devto
+Use "all" to request all 5 sources at once (for full reports).
+
+IMPORTANT: You MUST ALWAYS write a conversational message BEFORE any tags. Never respond with only tags and no text. The text before the tag is what the user sees.
+
+When you include [NEED_DATA], write a brief natural acknowledgment BEFORE the tag, like "Let me check GitHub trending for you!" or "Pulling up the latest Hacker News stories..." — this message will be shown to the user while data loads.
+
+Only request data when you actually need current/live information. For general conversation, settings questions, idea brainstorming from memory, or simple questions, respond directly without [NEED_DATA].
+
+Examples:
+- "What's trending on GitHub?" -> acknowledge + [NEED_DATA:github]
+- "Show me HN and Reddit" -> acknowledge + [NEED_DATA:hn,reddit]
+- "Give me a full report" -> acknowledge + [NEED_DATA:all]
+- "What are my settings?" -> respond directly, no data needed
+- "Change my interests" -> respond directly with settings update
+- "Tell me about React" -> respond directly from knowledge
+
+UPDATING SETTINGS:
+When the user wants to change preferences, FIRST write a friendly confirmation message, THEN include the tag at the end:
+[SETTINGS_UPDATE]{"field":"value",...}[/SETTINGS_UPDATE]
+
+Example: "Done! I've updated your interests to AI, robotics, and blockchain." followed by the tag.
+
+Available fields:
 - interests: array of strings
 - languages: array of strings
 - avoidTopics: array of strings
-- ideaStyle: string (e.g. "practical", "ambitious", "experimental")
-- model: string (must be one of: ${allModels.join(', ')})
-- reportEnabled: boolean (true to enable auto-reports, false to disable)
-- reportCron: string (a valid 5-field cron expression — minute hour dayOfMonth month dayOfWeek)
-- reportScheduleText: string (human-readable description of the schedule you set)
-- dailyReportTime: string (HH:MM format, update this when the report time changes)
-- timezone: string (IANA timezone, e.g. "Asia/Hong_Kong", "America/New_York")
+- ideaStyle: string ("practical", "ambitious", "experimental")
+- model: string (one of: ${allModels.join(', ')})
+- reportEnabled: boolean
+- reportCron: string (5-field cron: minute hour dayOfMonth month dayOfWeek)
+- reportScheduleText: string (human description)
+- dailyReportTime: string (HH:MM)
+- timezone: string (IANA, e.g. "Asia/Hong_Kong")
 - maxGitHubRepos: number (1-25)
 - maxHNStories: number (1-30)
 - maxRedditPosts: number (1-30)
 - maxPHProducts: number (1-10)
 - maxDevToArticles: number (1-15)
 
-SCHEDULE RULES:
-When the user changes the report schedule, you MUST set reportCron, reportScheduleText, and (if the time changes) dailyReportTime. Cron format: "minute hour dayOfMonth month dayOfWeek" (5 fields, no seconds).
-- "stop daily reports" / "turn off reports" → set reportEnabled to false
-- "turn reports back on" / "resume reports" → set reportEnabled to true
-- "send reports at 8pm" → reportCron: "0 20 * * *", reportScheduleText: "Daily at 20:00", dailyReportTime: "20:00"
-- "every Monday" → reportCron: "0 6 * * 1", reportScheduleText: "Every Monday at 06:00" (keep current time)
-- "every Tuesday and Friday at 9am" → reportCron: "0 9 * * 2,5", reportScheduleText: "Every Tuesday and Friday at 09:00", dailyReportTime: "09:00"
-- "on the 2nd of every month" → reportCron: "0 6 2 * *", reportScheduleText: "Monthly on the 2nd at 06:00"
-- "every weekday" → reportCron: "0 6 * * 1-5", reportScheduleText: "Every weekday at 06:00"
-- "twice a day at 8am and 6pm" → reportCron: "0 8,18 * * *", reportScheduleText: "Twice daily at 08:00 and 18:00"
-- "every 2 hours" → reportCron: "0 */2 * * *", reportScheduleText: "Every 2 hours"
-- When changing only frequency but not time, preserve the current time in the cron.
-- When changing only time but not frequency, preserve the current frequency pattern.
+Settings rules:
+- "add X to interests" -> include existing items plus the new one
+- "remove X" -> include existing items minus that one
+- "set interests to X, Y" -> replace entirely
+- Schedule changes need reportCron + reportScheduleText + dailyReportTime (if time changes)
+- "stop/pause reports" -> reportEnabled: false
+- "resume/restart reports" -> reportEnabled: true
 
-OTHER SETTINGS RULES:
-- "add X to my interests/languages" → include existing items PLUS the new one
-- "remove X from my interests" → include existing items MINUS that one
-- "set my interests to X, Y, Z" → replace entirely with new list
-- "switch to model X" or "use X" → set model field (match to closest valid model name)
-- "show me more GitHub repos" → increase maxGitHubRepos
-- "I don't want to see blockchain stuff" → add to avoidTopics
-- Always respond conversationally AND include the tag block
+RESPONSE FORMAT (CRITICAL):
+- Write CLEAN PLAIN TEXT only
+- NEVER use Markdown formatting: no *, **, _, \`, #, []()
+- NEVER use HTML tags: no <b>, <i>, <code>, etc.
+- Use emoji for visual structure (section headers, bullet markers)
+- Use numbered lists (1. 2. 3.) and dashes (- item) for structure
+- Use ALL CAPS sparingly for emphasis on key terms
+- Use line breaks and spacing for readability
+- Be conversational, detailed, and insightful
+- When presenting data, analyze and synthesize it — don't just list items
+- Draw connections between trends across different sources
+- Provide actionable insights and your perspective`;
+  }
 
-Example response when user says "send me reports every Monday and Thursday at 9am":
-Done! I've updated your report schedule to every Monday and Thursday at 9AM. You'll get your trend digest twice a week now! 📅
-[SETTINGS_UPDATE]{"reportCron":"0 9 * * 1,4","reportScheduleText":"Every Monday and Thursday at 09:00","dailyReportTime":"09:00"}[/SETTINGS_UPDATE]
+  function parseResponse(text) {
+    let cleanText = text;
+    let dataSources = [];
+    let settingsUpdate = null;
 
-Example response when user says "stop giving me daily reports":
-Got it, I've turned off the automatic reports. You can still use /report anytime to get a fresh report on demand. Just let me know when you want to turn them back on! 🔕
-[SETTINGS_UPDATE]{"reportEnabled":false}[/SETTINGS_UPDATE]
-
-If the message is NOT about changing settings, just respond normally without any tags.`;
-
-    try {
-      const response = await chat(model, [
-        { role: 'system', content: settingsPrompt },
-        ...history,
-      ]);
-
-      const { cleanResponse, settingsUpdate } = parseSettingsUpdate(response);
-
-      if (settingsUpdate) {
-        try {
-          const updated = updatePreferences(settingsUpdate);
-          console.log('[Bot] Settings updated via natural language:', JSON.stringify(settingsUpdate));
-
-          const scheduleFields = ['reportEnabled', 'reportCron', 'reportScheduleText', 'dailyReportTime', 'timezone'];
-          const hasScheduleChange = scheduleFields.some(f => f in settingsUpdate);
-          if (hasScheduleChange) {
-            restartCron();
-            console.log('[Bot] Cron restarted after schedule change');
-          }
-
-          const confirmParts = [];
-          if (settingsUpdate.interests) confirmParts.push(`Interests: ${updated.interests.join(', ')}`);
-          if (settingsUpdate.languages) confirmParts.push(`Languages: ${updated.languages.join(', ')}`);
-          if (settingsUpdate.avoidTopics) confirmParts.push(`Avoid: ${updated.avoidTopics.join(', ') || 'nothing'}`);
-          if (settingsUpdate.ideaStyle) confirmParts.push(`Idea style: ${updated.ideaStyle}`);
-          if (settingsUpdate.model) confirmParts.push(`Model: ${updated.model}`);
-          if ('reportEnabled' in settingsUpdate) confirmParts.push(`Reports: ${updated.reportEnabled ? 'enabled' : 'disabled'}`);
-          if (settingsUpdate.reportScheduleText) confirmParts.push(`Schedule: ${updated.reportScheduleText}`);
-          if (settingsUpdate.timezone) confirmParts.push(`Timezone: ${updated.timezone}`);
-          if (settingsUpdate.maxGitHubRepos) confirmParts.push(`GitHub repos: ${updated.maxGitHubRepos}`);
-          if (settingsUpdate.maxHNStories) confirmParts.push(`HN stories: ${updated.maxHNStories}`);
-          if (settingsUpdate.maxRedditPosts) confirmParts.push(`Reddit posts: ${updated.maxRedditPosts}`);
-          if (settingsUpdate.maxPHProducts) confirmParts.push(`PH products: ${updated.maxPHProducts}`);
-          if (settingsUpdate.maxDevToArticles) confirmParts.push(`Dev.to articles: ${updated.maxDevToArticles}`);
-
-          const confirm = confirmParts.length > 0
-            ? `\n\n⚙️ <b>Settings saved:</b>\n${confirmParts.map(p => `  • ${p}`).join('\n')}`
-            : '';
-
-          addToHistory(chatId, 'assistant', cleanResponse);
-          await sendLongMessage(ctx, cleanResponse + confirm, 'HTML');
-        } catch (parseErr) {
-          console.error('[Bot] Failed to apply settings:', parseErr.message);
-          addToHistory(chatId, 'assistant', cleanResponse);
-          await sendLongMessage(ctx, cleanResponse, 'HTML');
-        }
+    const dataMatch = cleanText.match(/\[NEED_DATA:([^\]]+)\]/);
+    if (dataMatch) {
+      const sources = dataMatch[1].toLowerCase().split(',').map(s => s.trim());
+      if (sources.includes('all')) {
+        dataSources = ['github', 'hn', 'reddit', 'ph', 'devto'];
       } else {
-        addToHistory(chatId, 'assistant', cleanResponse);
-        await sendLongMessage(ctx, cleanResponse, 'HTML');
+        dataSources = sources.filter(s => ['github', 'hn', 'reddit', 'ph', 'devto'].includes(s));
       }
-    } catch (err) {
-      console.error('[Bot] Chat error:', err.message);
-      await ctx.reply('❌ Sorry, I encountered an error. Try again or check /models.');
+      cleanText = cleanText.replace(/\[NEED_DATA:[^\]]+\]/g, '').trim();
     }
-  });
+
+    const settingsMatch = cleanText.match(/\[SETTINGS_UPDATE\]([\s\S]*?)\[\/SETTINGS_UPDATE\]/);
+    if (settingsMatch) {
+      cleanText = cleanText.replace(/\[SETTINGS_UPDATE\][\s\S]*?\[\/SETTINGS_UPDATE\]/g, '').trim();
+      try {
+        const parsed = JSON.parse(settingsMatch[1].trim());
+        const allowed = new Set([
+          'interests', 'languages', 'avoidTopics', 'ideaStyle', 'model',
+          'reportEnabled', 'reportCron', 'reportScheduleText', 'dailyReportTime', 'timezone',
+          'maxGitHubRepos', 'maxHNStories', 'maxRedditPosts', 'maxPHProducts', 'maxDevToArticles',
+        ]);
+        const aliases = {
+          report_schedule: 'reportScheduleText', report_time: 'dailyReportTime',
+          report_cron: 'reportCron', report_enabled: 'reportEnabled',
+          avoid_topics: 'avoidTopics', idea_style: 'ideaStyle',
+          daily_report_time: 'dailyReportTime', schedule_text: 'reportScheduleText',
+          max_github_repos: 'maxGitHubRepos', max_hn_stories: 'maxHNStories',
+          max_reddit_posts: 'maxRedditPosts', max_ph_products: 'maxPHProducts',
+          max_devto_articles: 'maxDevToArticles',
+        };
+        settingsUpdate = {};
+        for (const [key, value] of Object.entries(parsed)) {
+          const normalizedKey = aliases[key] || key;
+          if (allowed.has(normalizedKey)) settingsUpdate[normalizedKey] = value;
+        }
+        if (Object.keys(settingsUpdate).length === 0) settingsUpdate = null;
+      } catch {
+        console.warn('[Bot] Failed to parse settings JSON from AI response');
+      }
+    }
+
+    return { cleanText, dataSources, settingsUpdate };
+  }
+
+  async function fetchSources(sources, prefs) {
+    const results = {};
+    const fetchers = {
+      github: () => withRetry(() => fetchGitHubTrendingByPrefs(prefs.languages, prefs.maxGitHubRepos), { label: 'GitHub' }),
+      hn: () => withRetry(() => fetchTopStories(prefs.maxHNStories), { label: 'HN' }),
+      reddit: () => withRetry(() => fetchRedditHot(), { label: 'Reddit' }),
+      ph: () => withRetry(() => fetchProductHunt(), { label: 'PH' }),
+      devto: () => withRetry(() => fetchDevToByInterests(prefs.interests), { label: 'DevTo' }),
+    };
+
+    await Promise.all(sources.map(async (source) => {
+      try {
+        results[source] = await fetchers[source]();
+      } catch (err) {
+        console.error(`[Bot] Fetch ${source} failed:`, err.message);
+        results[source] = [];
+      }
+    }));
+
+    return results;
+  }
+
+  function formatDataForAI(data) {
+    let text = '';
+
+    if (data.github?.length > 0) {
+      text += 'GITHUB TRENDING REPOS:\n';
+      data.github.forEach((r, i) => {
+        text += `${i + 1}. ${r.name} (${r.language}, ${r.totalStars} total stars, ${r.starsToday} today) - ${r.description} | URL: ${r.url}\n`;
+      });
+      text += '\n';
+    }
+
+    if (data.hn?.length > 0) {
+      text += 'HACKER NEWS TOP STORIES:\n';
+      data.hn.forEach((s, i) => {
+        text += `${i + 1}. "${s.title}" (${s.score} pts, ${s.comments} comments, by ${s.by}) - ${s.url}\n`;
+      });
+      text += '\n';
+    }
+
+    if (data.reddit?.length > 0) {
+      text += 'REDDIT HOT POSTS:\n';
+      data.reddit.forEach((p, i) => {
+        text += `${i + 1}. [r/${p.subreddit}] "${p.title}" (${p.score} upvotes, ${p.comments} comments) - ${p.url}\n`;
+      });
+      text += '\n';
+    }
+
+    if (data.ph?.length > 0) {
+      text += 'PRODUCT HUNT LAUNCHES:\n';
+      data.ph.forEach((p, i) => {
+        text += `${i + 1}. ${p.name} - ${p.tagline} (${p.votes} upvotes) - ${p.url}\n`;
+      });
+      text += '\n';
+    }
+
+    if (data.devto?.length > 0) {
+      text += 'DEV.TO TOP ARTICLES:\n';
+      data.devto.forEach((a, i) => {
+        text += `${i + 1}. "${a.title}" by ${a.author} (${a.reactions} reactions, ${a.readingTime}min read) [${a.tags.join(', ')}] - ${a.url}\n`;
+      });
+      text += '\n';
+    }
+
+    const sourceCount = Object.values(data).filter(arr => arr?.length > 0).length;
+    if (sourceCount === 0) {
+      text = 'No data could be fetched from any of the requested sources at this time.\n';
+    }
+
+    return text;
+  }
 
   return bot;
-}
-
-async function sendLongMessage(ctx, text, parseMode) {
-  const maxLen = 4000;
-  if (text.length <= maxLen) {
-    try {
-      await ctx.reply(text, parseMode ? { parse_mode: parseMode } : {});
-    } catch {
-      await ctx.reply(stripFormatting(text));
-    }
-    return;
-  }
-  const chunks = [];
-  let remaining = text;
-  while (remaining.length > 0) {
-    if (remaining.length <= maxLen) {
-      chunks.push(remaining);
-      break;
-    }
-    let splitAt = remaining.lastIndexOf('\n', maxLen);
-    if (splitAt < maxLen * 0.5) splitAt = maxLen;
-    chunks.push(remaining.substring(0, splitAt));
-    remaining = remaining.substring(splitAt);
-  }
-  for (const chunk of chunks) {
-    try {
-      await ctx.reply(chunk, parseMode ? { parse_mode: parseMode } : {});
-    } catch {
-      await ctx.reply(stripFormatting(chunk));
-    }
-  }
-}
-
-function stripFormatting(text) {
-  return text.replace(/<[^>]+>/g, '').replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, '');
-}
-
-function escapeHtml(text) {
-  if (!text) return '';
-  return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
-function parseSettingsUpdate(response) {
-  const match = response.match(/\[SETTINGS_UPDATE\]([\s\S]*?)\[\/SETTINGS_UPDATE\]/);
-  if (!match) return { cleanResponse: response, settingsUpdate: null };
-
-  const cleanResponse = response
-    .replace(/\[SETTINGS_UPDATE\][\s\S]*?\[\/SETTINGS_UPDATE\]/, '')
-    .trim();
-
-  try {
-    const parsed = JSON.parse(match[1].trim());
-    const allowed = new Set([
-      'interests', 'languages', 'avoidTopics', 'ideaStyle', 'model',
-      'reportEnabled', 'reportCron', 'reportScheduleText', 'dailyReportTime', 'timezone',
-      'maxGitHubRepos', 'maxHNStories', 'maxRedditPosts', 'maxPHProducts', 'maxDevToArticles',
-    ]);
-    const settingsUpdate = {};
-    for (const [key, value] of Object.entries(parsed)) {
-      if (allowed.has(key)) settingsUpdate[key] = value;
-    }
-    return { cleanResponse, settingsUpdate: Object.keys(settingsUpdate).length > 0 ? settingsUpdate : null };
-  } catch {
-    console.warn('[Bot] Failed to parse settings JSON from LLM response');
-    return { cleanResponse, settingsUpdate: null };
-  }
 }
 
 module.exports = { createBot };
