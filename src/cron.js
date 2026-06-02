@@ -1,6 +1,7 @@
 const cron = require('node-cron');
 const { generateDailyReport } = require('./report');
 const { loadPreferences } = require('./preferences');
+const { startAllSchedules, restartAllSchedules } = require('./schedules');
 
 let currentJob = null;
 let botRef = null;
@@ -35,7 +36,7 @@ async function sendReport(bot) {
         remaining = remaining.substring(splitAt).trimStart();
       }
     }
-    console.log('[CRON] Report sent successfully.');
+    console.log('[CRON] Default report sent successfully.');
   } catch (err) {
     console.error('[CRON] Failed to send report:', err.message);
     try {
@@ -48,8 +49,10 @@ function startCron(bot) {
   botRef = bot;
   const prefs = loadPreferences();
 
+  startAllSchedules(bot);
+
   if (prefs.reportEnabled === false) {
-    console.log('[CRON] Reports disabled by user preference');
+    console.log('[CRON] Default report disabled by preference');
     return null;
   }
 
@@ -60,20 +63,20 @@ function startCron(bot) {
     currentJob = cron.schedule('0 6 * * *', () => sendReport(bot), {
       timezone: prefs.timezone || 'Asia/Hong_Kong',
     });
-    console.log('[CRON] Scheduled: Daily at 06:00 (fallback)');
+    console.log('[CRON] Scheduled default report: Daily at 06:00 (fallback)');
     return currentJob;
   }
 
   const label = scheduleLabel(prefs);
 
   currentJob = cron.schedule(expr, () => {
-    console.log(`[CRON] Running scheduled report (${label})...`);
+    console.log(`[CRON] Running default report (${label})...`);
     sendReport(bot);
   }, {
     timezone: prefs.timezone || 'Asia/Hong_Kong',
   });
 
-  console.log(`[CRON] Scheduled: ${label} [${expr}]`);
+  console.log(`[CRON] Default report: ${label} [${expr}]`);
   return currentJob;
 }
 
@@ -82,6 +85,7 @@ function restartCron() {
     currentJob.stop();
     currentJob = null;
   }
+  restartAllSchedules();
   if (botRef) {
     return startCron(botRef);
   }

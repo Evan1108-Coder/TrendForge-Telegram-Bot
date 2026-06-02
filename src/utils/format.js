@@ -1,6 +1,7 @@
 function cleanOutput(text) {
   if (!text) return '';
   return text
+    .replace(/\[ACTIONS\][\s\S]*?\[\/ACTIONS\]/g, '')
     .replace(/\[NEED_DATA:[^\]]*\]/g, '')
     .replace(/\[SETTINGS_UPDATE\][\s\S]*?\[\/SETTINGS_UPDATE\]/g, '')
     .replace(/\[TOOL_CALL\][\s\S]*?\[\/TOOL_CALL\]/g, '')

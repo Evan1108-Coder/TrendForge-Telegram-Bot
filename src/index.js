@@ -9,7 +9,7 @@ if (!TOKEN) {
 }
 
 async function main() {
-  console.log('🔨 TrendForge v3.0 starting...');
+  console.log('🔨 TrendForge v3.1 starting...');
   const bot = createBot(TOKEN);
 
   bot.catch((err) => {
@@ -24,7 +24,7 @@ async function main() {
       const { getAvailableModels } = require('./llm/providers');
       const { scheduleLabel } = require('./cron');
       const available = getAvailableModels();
-      console.log(`🔨 TrendForge v3.0 running as @${info.username}`);
+      console.log(`🔨 TrendForge v3.1 running as @${info.username}`);
       console.log(`   Model: ${prefs.model}`);
       console.log(`   Available models: ${available.length}`);
       console.log(`   Sources: GitHub, HN, Reddit, Product Hunt, Dev.to`);

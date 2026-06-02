@@ -1,7 +1,11 @@
 const { Bot } = require('grammy');
+const { execSync } = require('child_process');
+const axios = require('axios');
 const { chat, getAllModels, getAvailableModels } = require('./llm/providers');
 const { loadPreferences, updatePreferences } = require('./preferences');
 const { restartCron, scheduleLabel } = require('./cron');
+const { addSchedule, removeSchedule, listSchedules, restartAllSchedules } = require('./schedules');
+const { saveNote, readNote, deleteNote, listNotes } = require('./notes');
 const { fetchGitHubTrendingByPrefs } = require('./scrapers/github');
 const { fetchTopStories } = require('./scrapers/hackernews');
 const { fetchRedditHot } = require('./scrapers/reddit');
@@ -15,6 +19,7 @@ function createBot(token) {
   const conversationHistory = new Map();
   const messageQueue = new Map();
   const processing = new Set();
+  const activeReminders = new Map();
 
   function getHistory(chatId) {
     if (!conversationHistory.has(chatId)) conversationHistory.set(chatId, []);
@@ -30,17 +35,22 @@ function createBot(token) {
   bot.command('start', async (ctx) => {
     console.log(`[Bot] /start from ${ctx.from.first_name} (${ctx.from.id}), chat ${ctx.chat.id}`);
     await ctx.reply(
-      '🔨 Welcome to TrendForge!\n\n' +
-      'I\'m your AI-powered tech trend assistant. I monitor GitHub, Hacker News, Reddit, Product Hunt, and Dev.to to keep you informed about what\'s happening in tech.\n\n' +
-      'Just talk to me naturally! For example:\n' +
+      '🔨 Welcome to TrendForge v3.1!\n\n' +
+      'I\'m your AI-powered tech assistant. I can:\n\n' +
+      '- Fetch trends from GitHub, HN, Reddit, Product Hunt, Dev.to\n' +
+      '- Set up complex schedules (multiple daily reports, bimonthly patterns, etc.)\n' +
+      '- Set reminders\n' +
+      '- Save and recall notes\n' +
+      '- Fetch data from any URL\n' +
+      '- Run system info commands\n' +
+      '- Manage your preferences\n\n' +
+      'Just talk to me naturally! Examples:\n' +
       '- "What\'s trending on GitHub?"\n' +
-      '- "Give me today\'s full report"\n' +
-      '- "Any interesting AI projects lately?"\n' +
-      '- "Generate a project idea about web scraping"\n' +
-      '- "Change my report schedule to every Monday at 9am"\n' +
-      '- "Show me my current settings"\n' +
-      '- "What\'s hot on Hacker News and Reddit?"\n\n' +
-      'I can fetch live data, analyze trends, brainstorm ideas, and manage your settings. Just tell me what you need!'
+      '- "Report me 2 times a day"\n' +
+      '- "Remind me in 30 minutes to check the deploy"\n' +
+      '- "Save a note about my project idea"\n' +
+      '- "Show all my schedules"\n\n' +
+      'I figure out what to do from your message -- no commands needed!'
     );
   });
 
@@ -102,43 +112,36 @@ function createBot(token) {
 
       const parsed = parseResponse(phase1Response);
 
-      if (parsed.settingsUpdate) {
-        applySettings(parsed.settingsUpdate);
-      }
+      if (parsed.actions.length > 0) {
+        const results = await executeActions(parsed.actions, prefs, ctx, chatId);
+        const hasData = results.some(r => r.type === 'data');
 
-      if (parsed.dataSources.length > 0) {
-        const ack = cleanOutput(parsed.cleanText) || 'Let me fetch that data for you...';
-        await ctx.reply(ack);
+        if (hasData) {
+          const ack = cleanOutput(parsed.cleanText) || 'Let me process that for you...';
+          await ctx.reply(ack);
 
-        const data = await fetchSources(parsed.dataSources, prefs);
-        const dataText = formatDataForAI(data);
+          const resultsText = formatActionResults(results);
+          const phase2Response = await chat(model, [
+            { role: 'system', content: systemPrompt },
+            ...history,
+            { role: 'assistant', content: ack },
+            { role: 'user', content: `[Action results]\n\n${resultsText}\n\nNow provide your detailed response based on these results. Remember: plain text only, no markdown, no HTML. Be detailed and insightful.` },
+          ]);
 
-        const phase2Response = await chat(model, [
-          { role: 'system', content: systemPrompt },
-          ...history,
-          { role: 'assistant', content: ack },
-          { role: 'user', content: `[Here is the live data you requested]\n\n${dataText}\n\nNow provide your detailed analysis and response based on this data. Remember: plain text only, no markdown, no HTML. Be detailed and insightful.` },
-        ]);
-
-        const cleaned = cleanOutput(phase2Response) || 'Here\'s what I found — but I had trouble formatting it. Try asking again!';
-        addToHistory(chatId, 'assistant', cleaned);
-        await sendLong(ctx, cleaned);
+          const cleaned = cleanOutput(phase2Response) || 'Here are the results, but I had trouble formatting them.';
+          addToHistory(chatId, 'assistant', cleaned);
+          await sendLong(ctx, cleaned);
+        } else {
+          let response = cleanOutput(parsed.cleanText);
+          if (!response) {
+            response = generateConfirmation(results);
+          }
+          addToHistory(chatId, 'assistant', response);
+          await sendLong(ctx, response);
+        }
       } else {
         let cleaned = cleanOutput(parsed.cleanText);
-        if (!cleaned && parsed.settingsUpdate) {
-          const parts = [];
-          const su = parsed.settingsUpdate;
-          if (su.interests) parts.push(`Interests: ${su.interests.join(', ')}`);
-          if (su.languages) parts.push(`Languages: ${su.languages.join(', ')}`);
-          if (su.avoidTopics) parts.push(`Avoid: ${su.avoidTopics.join(', ')}`);
-          if (su.ideaStyle) parts.push(`Idea style: ${su.ideaStyle}`);
-          if (su.model) parts.push(`Model: ${su.model}`);
-          if ('reportEnabled' in su) parts.push(`Reports: ${su.reportEnabled ? 'enabled' : 'disabled'}`);
-          if (su.reportScheduleText) parts.push(`Schedule: ${su.reportScheduleText}`);
-          if (su.timezone) parts.push(`Timezone: ${su.timezone}`);
-          cleaned = 'Done! Your settings have been updated:\n' + parts.map(p => `- ${p}`).join('\n');
-        }
-        if (!cleaned) cleaned = 'I\'m not sure how to respond to that. Try asking about tech trends, project ideas, or say "show me my settings"!';
+        if (!cleaned) cleaned = 'I\'m not sure how to respond to that. Try asking about tech trends, schedules, project ideas, or say "show my settings"!';
         addToHistory(chatId, 'assistant', cleaned);
         await sendLong(ctx, cleaned);
       }
@@ -146,6 +149,211 @@ function createBot(token) {
       console.error('[Bot] Error:', err.message);
       await ctx.reply('Something went wrong processing your request. Please try again or rephrase your question.');
     }
+  }
+
+  function generateConfirmation(results) {
+    const parts = [];
+    for (const r of results) {
+      if (r.type === 'confirmation') {
+        if (typeof r.result === 'object') {
+          if (r.result.success === false) parts.push(`Failed: ${r.result.error}`);
+          else if (r.result.name) parts.push(`Done: ${r.result.description || r.result.name}`);
+          else parts.push('Done!');
+        } else {
+          parts.push(String(r.result));
+        }
+      } else if (r.type === 'error') {
+        parts.push(`Error: ${r.result}`);
+      }
+    }
+    return parts.length > 0 ? parts.join('\n') : 'Done!';
+  }
+
+  async function executeActions(actions, prefs, ctx, chatId) {
+    const results = [];
+    for (const action of actions) {
+      try {
+        const result = await executeAction(action, prefs, ctx, chatId);
+        results.push(result);
+      } catch (err) {
+        console.error(`[Bot] Action "${action.action}" failed:`, err.message);
+        results.push({ type: 'error', action: action.action, result: err.message });
+      }
+    }
+    return results;
+  }
+
+  async function executeAction(action, prefs, ctx, chatId) {
+    const type = action.action;
+    const params = action.params || {};
+
+    switch (type) {
+      case 'fetch_data': {
+        let sources = params.sources || [];
+        if (typeof sources === 'string') sources = sources.split(',').map(s => s.trim());
+        if (sources.includes('all')) sources = ['github', 'hn', 'reddit', 'ph', 'devto'];
+        const data = await fetchSources(sources, prefs);
+        return { type: 'data', action: type, result: formatDataForAI(data) };
+      }
+
+      case 'update_settings': {
+        const settings = params.settings || params;
+        const settingsObj = normalizeSettings(settings);
+        if (settingsObj && Object.keys(settingsObj).length > 0) {
+          applySettings(settingsObj);
+          return { type: 'confirmation', action: type, result: { success: true, updated: Object.keys(settingsObj) } };
+        }
+        return { type: 'error', action: type, result: 'No valid settings to update' };
+      }
+
+      case 'add_schedule': {
+        const result = addSchedule(params.name, {
+          cron: params.cron,
+          type: params.type || 'report',
+          description: params.description || params.name,
+          message: params.message,
+          enabled: params.enabled,
+        });
+        return { type: 'confirmation', action: type, result };
+      }
+
+      case 'remove_schedule': {
+        const result = removeSchedule(params.name);
+        return { type: 'confirmation', action: type, result };
+      }
+
+      case 'list_schedules': {
+        const schedules = listSchedules();
+        let text = 'Active schedules:\n';
+        for (const s of schedules) {
+          const status = s.enabled ? 'ON' : 'OFF';
+          text += `- ${s.name} [${status}]: ${s.description} (cron: ${s.cron}, type: ${s.type})\n`;
+        }
+        return { type: 'data', action: type, result: text };
+      }
+
+      case 'reminder': {
+        const delayMin = params.delay_minutes || params.minutes || 1;
+        const msg = params.message || 'Reminder!';
+        const delayMs = Math.max(1, Math.min(delayMin, 1440)) * 60 * 1000;
+        const timerId = setTimeout(async () => {
+          try {
+            await ctx.reply(`⏰ Reminder: ${msg}`);
+          } catch (e) {
+            console.error('[Reminder] Failed:', e.message);
+          }
+          activeReminders.delete(timerId);
+        }, delayMs);
+        activeReminders.set(timerId, { message: msg, chatId, firesAt: Date.now() + delayMs });
+        return { type: 'confirmation', action: type, result: `Reminder set for ${delayMin} minute(s): "${msg}"` };
+      }
+
+      case 'http_fetch': {
+        const url = params.url;
+        if (!url) return { type: 'error', action: type, result: 'No URL provided' };
+        try {
+          const resp = await axios.get(url, {
+            timeout: 15000,
+            maxContentLength: 100000,
+            headers: { 'User-Agent': 'TrendForge/3.1' },
+          });
+          let content;
+          if (typeof resp.data === 'string') {
+            content = resp.data.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').substring(0, 5000);
+          } else {
+            content = JSON.stringify(resp.data, null, 2).substring(0, 5000);
+          }
+          return { type: 'data', action: type, result: `Content from ${url}:\n${content}` };
+        } catch (e) {
+          return { type: 'error', action: type, result: `Fetch failed: ${e.message}` };
+        }
+      }
+
+      case 'shell': {
+        const cmd = params.command;
+        if (!cmd) return { type: 'error', action: type, result: 'No command provided' };
+        if (!isSafeCommand(cmd)) {
+          return { type: 'error', action: type, result: `Command not allowed. Safe commands: uptime, date, df, node, npm, pm2, git status/log, ls, cat, head, tail, wc, ping, curl` };
+        }
+        try {
+          const output = execSync(cmd, { timeout: 10000, encoding: 'utf-8', maxBuffer: 50000 });
+          return { type: 'data', action: type, result: `$ ${cmd}\n${output.substring(0, 3000)}` };
+        } catch (e) {
+          return { type: 'error', action: type, result: `Command failed: ${e.stderr || e.message}` };
+        }
+      }
+
+      case 'note_save': {
+        if (!params.name || !params.content) return { type: 'error', action: type, result: 'Need name and content' };
+        saveNote(params.name, params.content);
+        return { type: 'confirmation', action: type, result: `Note "${params.name}" saved` };
+      }
+
+      case 'note_read': {
+        const note = readNote(params.name);
+        if (!note) return { type: 'error', action: type, result: `Note "${params.name}" not found` };
+        return { type: 'data', action: type, result: `Note "${note.name}" (updated ${note.updatedAt}):\n${note.content}` };
+      }
+
+      case 'note_list': {
+        const notes = listNotes();
+        if (notes.length === 0) return { type: 'data', action: type, result: 'No notes saved yet.' };
+        let text = 'Saved notes:\n';
+        for (const n of notes) {
+          text += `- ${n.name} (updated ${n.updatedAt}): ${n.preview}\n`;
+        }
+        return { type: 'data', action: type, result: text };
+      }
+
+      case 'note_delete': {
+        const result = deleteNote(params.name);
+        return { type: result.success ? 'confirmation' : 'error', action: type, result: result.success ? `Note "${params.name}" deleted` : result.error };
+      }
+
+      default:
+        return { type: 'error', action: type, result: `Unknown action: "${type}"` };
+    }
+  }
+
+  function isSafeCommand(cmd) {
+    const dangerous = /\b(rm|rmdir|kill|killall|shutdown|reboot|mkfs|dd|chmod|chown|passwd|sudo|su)\b/;
+    if (dangerous.test(cmd)) return false;
+    if (/[>|&;]/.test(cmd) && !/\|/.test(cmd)) return false;
+    if (cmd.includes('> /') || cmd.includes('>> ')) return false;
+    const binary = cmd.trim().split(/\s+/)[0];
+    const allowed = new Set([
+      'uptime', 'date', 'whoami', 'hostname', 'uname', 'df', 'du', 'free', 'top',
+      'node', 'npm', 'npx', 'pm2', 'git', 'cat', 'ls', 'head', 'tail', 'wc',
+      'ping', 'curl', 'wget', 'echo', 'which', 'env', 'printenv', 'pwd',
+    ]);
+    return allowed.has(binary);
+  }
+
+  function normalizeSettings(raw) {
+    const allowed = new Set([
+      'interests', 'languages', 'avoidTopics', 'ideaStyle', 'model',
+      'reportEnabled', 'reportCron', 'reportScheduleText', 'dailyReportTime', 'timezone',
+      'maxGitHubRepos', 'maxHNStories', 'maxRedditPosts', 'maxPHProducts', 'maxDevToArticles',
+    ]);
+    const aliases = {
+      report_schedule: 'reportScheduleText', report_time: 'dailyReportTime',
+      report_cron: 'reportCron', report_enabled: 'reportEnabled',
+      avoid_topics: 'avoidTopics', idea_style: 'ideaStyle',
+      daily_report_time: 'dailyReportTime', schedule_text: 'reportScheduleText',
+      max_github_repos: 'maxGitHubRepos', max_hn_stories: 'maxHNStories',
+      max_reddit_posts: 'maxRedditPosts', max_ph_products: 'maxPHProducts',
+      max_devto_articles: 'maxDevToArticles',
+    };
+    const result = {};
+    for (const [key, value] of Object.entries(raw)) {
+      if (key === 'settings' && typeof value === 'object') {
+        Object.assign(result, normalizeSettings(value));
+        continue;
+      }
+      const normalizedKey = aliases[key] || key;
+      if (allowed.has(normalizedKey)) result[normalizedKey] = value;
+    }
+    return Object.keys(result).length > 0 ? result : null;
   }
 
   function applySettings(settingsUpdate) {
@@ -164,23 +372,115 @@ function createBot(token) {
 
   function buildSystemPrompt(prefs, allModels) {
     const schedule = scheduleLabel(prefs);
-    return `You are TrendForge, an intelligent tech trend assistant running as a Telegram bot. You help users explore tech trends, discover projects, brainstorm ideas, manage preferences, and have conversations about technology.
+    const customSchedules = listSchedules().filter(s => s.source === 'custom');
+    const scheduleInfo = customSchedules.length > 0
+      ? customSchedules.map(s => `  - ${s.name}: ${s.description} [${s.cron}] (${s.enabled ? 'ON' : 'OFF'})`).join('\n')
+      : '  (none)';
 
-YOUR CAPABILITIES:
-You have access to real-time data from 5 sources:
-- GitHub Trending (github): Trending repositories across programming languages
-- Hacker News (hn): Top stories and discussions from the tech community
-- Reddit (reddit): Hot posts from programming communities (r/programming, r/webdev, r/MachineLearning, etc.)
-- Product Hunt (ph): Latest product launches and tools
-- Dev.to (devto): Top developer articles and tutorials
+    return `You are TrendForge, an intelligent tech assistant running as a Telegram bot. You help users with tech trends, project ideas, scheduling, reminders, notes, and general tech conversation.
 
-You can:
-- Fetch and analyze data from any combination of these sources
-- Generate comprehensive trend reports combining all sources
-- Brainstorm project ideas based on current trends and user interests
-- Update user preferences (interests, languages, schedule, model, limits, etc.)
-- Discuss tech topics, programming, industry trends, and more
-- Show the user their current configuration and settings
+ACTIONS SYSTEM:
+You can perform actions by including an [ACTIONS] block at the END of your message. It contains a JSON array of action objects.
+
+Format:
+[ACTIONS]
+[{"action": "action_name", "params": {...}}, ...]
+[/ACTIONS]
+
+CRITICAL RULES:
+- ALWAYS write a conversational message BEFORE the [ACTIONS] block
+- The text before [ACTIONS] is shown to the user while actions execute
+- Never respond with ONLY an [ACTIONS] block and no text
+- You can chain MULTIPLE actions in one block
+- For simple conversation or questions, respond WITHOUT any [ACTIONS] block
+
+AVAILABLE ACTIONS:
+
+1. fetch_data - Fetch live data from sources
+   params: {"sources": ["github", "hn", "reddit", "ph", "devto"]}
+   Use ["all"] for all 5 sources. Only use when you need CURRENT live data.
+
+2. update_settings - Change user preferences
+   params: {"settings": {"field": "value", ...}}
+   Fields: interests (array), languages (array), avoidTopics (array), ideaStyle (string: "practical"/"ambitious"/"experimental"), model (string), reportEnabled (boolean), reportCron (5-field cron string), reportScheduleText (string), dailyReportTime (HH:MM), timezone (IANA string), maxGitHubRepos (1-25), maxHNStories (1-30), maxRedditPosts (1-30), maxPHProducts (1-10), maxDevToArticles (1-15)
+
+3. add_schedule - Create a named recurring schedule
+   params: {"name": "unique-name", "cron": "min hour dom month dow", "type": "report" or "message", "description": "human-readable description", "message": "text for message-type schedules"}
+   SCHEDULING TIPS:
+   - Cron: minute(0-59) hour(0-23) dayOfMonth(1-31) month(1-12) dayOfWeek(0-6, 0=Sun)
+   - For "every 2 months" use months: 1,3,5,7,9,11 or 2,4,6,8,10,12
+   - For "3rd week" use days 15-21
+   - For "twice daily" create TWO schedules with different names
+   - For complex patterns, create MULTIPLE schedules each handling one part
+
+4. remove_schedule - Remove a schedule by name
+   params: {"name": "schedule-name"}
+
+5. list_schedules - List all active schedules
+   params: {}
+
+6. reminder - Set a one-time reminder (max 24 hours)
+   params: {"message": "reminder text", "delay_minutes": number}
+
+7. http_fetch - Fetch content from any URL
+   params: {"url": "https://..."}
+
+8. shell - Run a safe system command (read-only, no destructive ops)
+   params: {"command": "command string"}
+   Allowed: uptime, date, df, node, npm, pm2, git, ls, cat, head, tail, curl, ping, etc.
+
+9. note_save - Save a persistent note
+   params: {"name": "note-name", "content": "note content"}
+
+10. note_read - Read a saved note
+    params: {"name": "note-name"}
+
+11. note_list - List all saved notes
+    params: {}
+
+12. note_delete - Delete a saved note
+    params: {"name": "note-name"}
+
+EXAMPLES:
+
+User: "What's trending on GitHub?"
+Response: Let me check GitHub trending for you!
+[ACTIONS]
+[{"action": "fetch_data", "params": {"sources": ["github"]}}]
+[/ACTIONS]
+
+User: "Report me 2 times a day but 3 times on the 3rd week of every 2 months"
+Response: I'll set that up! Creating multiple schedules to cover your pattern.
+[ACTIONS]
+[{"action": "add_schedule", "params": {"name": "daily-morning", "cron": "0 9 * * *", "type": "report", "description": "Daily morning report at 9am"}},
+{"action": "add_schedule", "params": {"name": "daily-evening", "cron": "0 21 * * *", "type": "report", "description": "Daily evening report at 9pm"}},
+{"action": "add_schedule", "params": {"name": "bimonthly-3rdweek-noon", "cron": "0 12 15-21 1,3,5,7,9,11 *", "type": "report", "description": "Extra noon report on 3rd week of odd months"}}]
+[/ACTIONS]
+
+User: "Remind me in 30 minutes to review the PR"
+Response: Got it, I'll remind you in 30 minutes!
+[ACTIONS]
+[{"action": "reminder", "params": {"message": "Review the PR", "delay_minutes": 30}}]
+[/ACTIONS]
+
+User: "Save a note called 'project-idea' about building a CLI tool for git stats"
+Response: Saved that note for you!
+[ACTIONS]
+[{"action": "note_save", "params": {"name": "project-idea", "content": "Build a CLI tool for git stats - analyze commit patterns, contributor activity, and code churn across repos"}}]
+[/ACTIONS]
+
+User: "What's the server uptime and show me my notes?"
+Response: Let me check both for you!
+[ACTIONS]
+[{"action": "shell", "params": {"command": "uptime"}},
+{"action": "note_list", "params": {}}]
+[/ACTIONS]
+
+User: "What are my settings?"
+Response: (respond directly with current settings - no actions needed)
+
+User: "Tell me about React 19"
+Response: (respond from knowledge - no actions needed)
 
 CURRENT USER SETTINGS:
 - Interests: ${prefs.interests.join(', ')}
@@ -188,124 +488,94 @@ CURRENT USER SETTINGS:
 - Avoid topics: ${prefs.avoidTopics.length ? prefs.avoidTopics.join(', ') : 'none'}
 - Idea style: ${prefs.ideaStyle}
 - AI Model: ${prefs.model}
-- Report schedule: ${schedule}
-- Report enabled: ${prefs.reportEnabled !== false}
+- Default report: ${schedule} (enabled: ${prefs.reportEnabled !== false})
 - Timezone: ${prefs.timezone}
-- Source limits: GitHub ${prefs.maxGitHubRepos}, HN ${prefs.maxHNStories}, Reddit ${prefs.maxRedditPosts}, PH ${prefs.maxPHProducts}, Dev.to ${prefs.maxDevToArticles}
+- Limits: GitHub ${prefs.maxGitHubRepos}, HN ${prefs.maxHNStories}, Reddit ${prefs.maxRedditPosts}, PH ${prefs.maxPHProducts}, Dev.to ${prefs.maxDevToArticles}
+- Available models: ${allModels.join(', ')}
 
-REQUESTING DATA:
-If you need live data from any source to answer the user, include this tag at the very end of your message:
-[NEED_DATA:source1,source2,...]
-
-Available source names: github, hn, reddit, ph, devto
-Use "all" to request all 5 sources at once (for full reports).
-
-IMPORTANT: You MUST ALWAYS write a conversational message BEFORE any tags. Never respond with only tags and no text. The text before the tag is what the user sees.
-
-When you include [NEED_DATA], write a brief natural acknowledgment BEFORE the tag, like "Let me check GitHub trending for you!" or "Pulling up the latest Hacker News stories..." — this message will be shown to the user while data loads.
-
-Only request data when you actually need current/live information. For general conversation, settings questions, idea brainstorming from memory, or simple questions, respond directly without [NEED_DATA].
-
-Examples:
-- "What's trending on GitHub?" -> acknowledge + [NEED_DATA:github]
-- "Show me HN and Reddit" -> acknowledge + [NEED_DATA:hn,reddit]
-- "Give me a full report" -> acknowledge + [NEED_DATA:all]
-- "What are my settings?" -> respond directly, no data needed
-- "Change my interests" -> respond directly with settings update
-- "Tell me about React" -> respond directly from knowledge
-
-UPDATING SETTINGS:
-When the user wants to change preferences, FIRST write a friendly confirmation message, THEN include the tag at the end:
-[SETTINGS_UPDATE]{"field":"value",...}[/SETTINGS_UPDATE]
-
-Example: "Done! I've updated your interests to AI, robotics, and blockchain." followed by the tag.
-
-Available fields:
-- interests: array of strings
-- languages: array of strings
-- avoidTopics: array of strings
-- ideaStyle: string ("practical", "ambitious", "experimental")
-- model: string (one of: ${allModels.join(', ')})
-- reportEnabled: boolean
-- reportCron: string (5-field cron: minute hour dayOfMonth month dayOfWeek)
-- reportScheduleText: string (human description)
-- dailyReportTime: string (HH:MM)
-- timezone: string (IANA, e.g. "Asia/Hong_Kong")
-- maxGitHubRepos: number (1-25)
-- maxHNStories: number (1-30)
-- maxRedditPosts: number (1-30)
-- maxPHProducts: number (1-10)
-- maxDevToArticles: number (1-15)
-
-Settings rules:
-- "add X to interests" -> include existing items plus the new one
-- "remove X" -> include existing items minus that one
-- "set interests to X, Y" -> replace entirely
-- Schedule changes need reportCron + reportScheduleText + dailyReportTime (if time changes)
-- "stop/pause reports" -> reportEnabled: false
-- "resume/restart reports" -> reportEnabled: true
+CUSTOM SCHEDULES:
+${scheduleInfo}
 
 RESPONSE FORMAT (CRITICAL):
 - Write CLEAN PLAIN TEXT only
-- NEVER use Markdown formatting: no *, **, _, \`, #, []()
-- NEVER use HTML tags: no <b>, <i>, <code>, etc.
-- Use emoji for visual structure (section headers, bullet markers)
-- Use numbered lists (1. 2. 3.) and dashes (- item) for structure
-- Use ALL CAPS sparingly for emphasis on key terms
-- Use line breaks and spacing for readability
-- Be conversational, detailed, and insightful
-- When presenting data, analyze and synthesize it — don't just list items
-- Draw connections between trends across different sources
-- Provide actionable insights and your perspective`;
+- NEVER use Markdown: no *, **, _, \`, #, []()
+- NEVER use HTML: no <b>, <i>, <code>
+- Use emoji for visual structure
+- Use numbered lists and dashes
+- Use ALL CAPS sparingly for emphasis
+- Be conversational, detailed, and insightful`;
   }
 
   function parseResponse(text) {
     let cleanText = text;
-    let dataSources = [];
-    let settingsUpdate = null;
+    let actions = [];
 
-    const dataMatch = cleanText.match(/\[NEED_DATA:([^\]]+)\]/);
-    if (dataMatch) {
-      const sources = dataMatch[1].toLowerCase().split(',').map(s => s.trim());
-      if (sources.includes('all')) {
-        dataSources = ['github', 'hn', 'reddit', 'ph', 'devto'];
-      } else {
-        dataSources = sources.filter(s => ['github', 'hn', 'reddit', 'ph', 'devto'].includes(s));
-      }
-      cleanText = cleanText.replace(/\[NEED_DATA:[^\]]+\]/g, '').trim();
-    }
-
-    const settingsMatch = cleanText.match(/\[SETTINGS_UPDATE\]([\s\S]*?)\[\/SETTINGS_UPDATE\]/);
-    if (settingsMatch) {
-      cleanText = cleanText.replace(/\[SETTINGS_UPDATE\][\s\S]*?\[\/SETTINGS_UPDATE\]/g, '').trim();
+    const actionsMatch = cleanText.match(/\[ACTIONS\]([\s\S]*?)\[\/ACTIONS\]/);
+    if (actionsMatch) {
+      cleanText = cleanText.replace(/\[ACTIONS\][\s\S]*?\[\/ACTIONS\]/g, '').trim();
       try {
-        const parsed = JSON.parse(settingsMatch[1].trim());
-        const allowed = new Set([
-          'interests', 'languages', 'avoidTopics', 'ideaStyle', 'model',
-          'reportEnabled', 'reportCron', 'reportScheduleText', 'dailyReportTime', 'timezone',
-          'maxGitHubRepos', 'maxHNStories', 'maxRedditPosts', 'maxPHProducts', 'maxDevToArticles',
-        ]);
-        const aliases = {
-          report_schedule: 'reportScheduleText', report_time: 'dailyReportTime',
-          report_cron: 'reportCron', report_enabled: 'reportEnabled',
-          avoid_topics: 'avoidTopics', idea_style: 'ideaStyle',
-          daily_report_time: 'dailyReportTime', schedule_text: 'reportScheduleText',
-          max_github_repos: 'maxGitHubRepos', max_hn_stories: 'maxHNStories',
-          max_reddit_posts: 'maxRedditPosts', max_ph_products: 'maxPHProducts',
-          max_devto_articles: 'maxDevToArticles',
-        };
-        settingsUpdate = {};
-        for (const [key, value] of Object.entries(parsed)) {
-          const normalizedKey = aliases[key] || key;
-          if (allowed.has(normalizedKey)) settingsUpdate[normalizedKey] = value;
+        let jsonStr = actionsMatch[1].trim();
+        if (jsonStr.startsWith('[')) {
+          actions = JSON.parse(jsonStr);
+        } else {
+          actions = JSON.parse(`[${jsonStr}]`);
         }
-        if (Object.keys(settingsUpdate).length === 0) settingsUpdate = null;
-      } catch {
-        console.warn('[Bot] Failed to parse settings JSON from AI response');
+        if (!Array.isArray(actions)) actions = [actions];
+      } catch (e) {
+        console.warn('[Bot] Failed to parse [ACTIONS] JSON:', e.message);
+        try {
+          const fixed = actionsMatch[1].trim()
+            .replace(/,\s*([}\]])/g, '$1')
+            .replace(/'/g, '"');
+          actions = JSON.parse(fixed.startsWith('[') ? fixed : `[${fixed}]`);
+          if (!Array.isArray(actions)) actions = [actions];
+        } catch {
+          console.warn('[Bot] Could not recover [ACTIONS] JSON');
+        }
       }
     }
 
-    return { cleanText, dataSources, settingsUpdate };
+    if (actions.length === 0) {
+      const dataMatch = cleanText.match(/\[NEED_DATA:([^\]]+)\]/);
+      if (dataMatch) {
+        const sources = dataMatch[1].toLowerCase().split(',').map(s => s.trim());
+        const resolved = sources.includes('all')
+          ? ['github', 'hn', 'reddit', 'ph', 'devto']
+          : sources.filter(s => ['github', 'hn', 'reddit', 'ph', 'devto'].includes(s));
+        if (resolved.length > 0) {
+          actions.push({ action: 'fetch_data', params: { sources: resolved } });
+        }
+        cleanText = cleanText.replace(/\[NEED_DATA:[^\]]+\]/g, '').trim();
+      }
+
+      const settingsMatch = cleanText.match(/\[SETTINGS_UPDATE\]([\s\S]*?)\[\/SETTINGS_UPDATE\]/);
+      if (settingsMatch) {
+        cleanText = cleanText.replace(/\[SETTINGS_UPDATE\][\s\S]*?\[\/SETTINGS_UPDATE\]/g, '').trim();
+        try {
+          const parsed = JSON.parse(settingsMatch[1].trim());
+          actions.push({ action: 'update_settings', params: { settings: parsed } });
+        } catch {
+          console.warn('[Bot] Failed to parse legacy SETTINGS_UPDATE');
+        }
+      }
+    }
+
+    return { cleanText, actions };
+  }
+
+  function formatActionResults(results) {
+    let text = '';
+    for (const r of results) {
+      if (r.type === 'data') {
+        text += `--- ${r.action} ---\n${r.result}\n\n`;
+      } else if (r.type === 'confirmation') {
+        const msg = typeof r.result === 'object' ? JSON.stringify(r.result) : r.result;
+        text += `--- ${r.action} (done) ---\n${msg}\n\n`;
+      } else if (r.type === 'error') {
+        text += `--- ${r.action} (error) ---\n${r.result}\n\n`;
+      }
+    }
+    return text || 'No results from actions.';
   }
 
   async function fetchSources(sources, prefs) {
@@ -320,7 +590,7 @@ RESPONSE FORMAT (CRITICAL):
 
     await Promise.all(sources.map(async (source) => {
       try {
-        results[source] = await fetchers[source]();
+        if (fetchers[source]) results[source] = await fetchers[source]();
       } catch (err) {
         console.error(`[Bot] Fetch ${source} failed:`, err.message);
         results[source] = [];
@@ -373,8 +643,7 @@ RESPONSE FORMAT (CRITICAL):
       text += '\n';
     }
 
-    const sourceCount = Object.values(data).filter(arr => arr?.length > 0).length;
-    if (sourceCount === 0) {
+    if (Object.values(data).every(arr => !arr?.length)) {
       text = 'No data could be fetched from any of the requested sources at this time.\n';
     }
 
