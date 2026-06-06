@@ -1,5 +1,23 @@
 # TrendForge Telegram Bot v2.0
 
+> Status: beta. The bot is designed for daily developer trend discovery, but source quality depends on each upstream platform and API/feed availability.
+
+TrendForge is for builders who want project ideas from real developer signals instead of generic AI brainstorming.
+
+## Why Use TrendForge?
+
+- Combines multiple trend sources into one daily Telegram briefing.
+- Filters ideas around your interests and preferred languages.
+- Turns raw links into buildable project directions.
+- Lets you ask follow-up questions conversationally.
+
+## Current Limitations
+
+- Trend quality depends on GitHub, Hacker News, Reddit, Product Hunt, and Dev.to availability.
+- LLM-generated ideas still need human judgment before building.
+- Telegram and AI provider tokens are required for a full setup.
+
+
 AI-powered Telegram bot that monitors **5 data sources** daily — GitHub Trending, Hacker News, Reddit, Product Hunt, and Dev.to — uses LLM to filter and generate personalized project ideas, and sends you a daily briefing.
 
 ## Features
