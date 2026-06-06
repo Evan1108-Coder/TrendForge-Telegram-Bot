@@ -78,6 +78,13 @@ See [SETUP.md](SETUP.md) for detailed installation instructions.
 
 ## Architecture
 
+![Architecture](docs/images/architecture.jpg)
+
+*Five data sources feed through a scraper engine and AI layer to deliver personalized trend reports via Telegram.*
+
+<details>
+<summary>Project Structure</summary>
+
 ```
 src/
   index.js          - Entry point
@@ -96,6 +103,8 @@ src/
   utils/
     retry.js        - Retry with exponential backoff utility
 ```
+
+</details>
 
 ## License
 
