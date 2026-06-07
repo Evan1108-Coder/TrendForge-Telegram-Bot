@@ -38,6 +38,12 @@ const PROVIDERS = {
       'minimax-m2.5-lightning': 'MiniMax-M1',
     },
   },
+  moonshot: {
+    url: 'https://api.moonshot.cn/v1/chat/completions',
+    models: ['kimi-latest', 'kimi-k2-thinking', 'kimi-k2-turbo-preview', 'kimi-k2.5-vision', 'moonshot-v1-128k'],
+    authHeader: key => ({ Authorization: `Bearer ${key}` }),
+    envKey: 'MOONSHOT_API_KEY',
+  },
 };
 
 const TOGETHER_MODEL_MAP = {
@@ -121,6 +127,88 @@ async function chat(model, messages) {
   return callOpenAICompatible(provider.url, provider.authHeader(key), model, messages, provider.modelMap);
 }
 
+const VISION_MODELS = new Set([
+  'gpt-5.4-pro', 'gpt-5.4-mini', 'gpt-4o', 'gpt-4o-mini',
+  'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5', 'claude-3.5-sonnet',
+  'gemini-3.1-pro', 'gemini-3-flash', 'gemini-2.5-flash-lite',
+  'kimi-k2.5-vision',
+]);
+
+function supportsVision(model) {
+  return VISION_MODELS.has(model);
+}
+
+async function chatWithVision(model, messages, imageBase64, mimeType) {
+  const provider = getProviderForModel(model);
+  if (!provider) throw new Error(`Unknown model: ${model}`);
+  const key = getApiKey(provider);
+  if (!key) throw new Error(`No API key set for ${provider.name}`);
+
+  if (provider.name === 'anthropic') {
+    const system = messages.find(m => m.role === 'system')?.content || '';
+    const userMessages = messages.filter(m => m.role !== 'system').map(m => {
+      if (m.role === 'user' && m === messages[messages.length - 1]) {
+        return {
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'base64', media_type: mimeType, data: imageBase64 } },
+            { type: 'text', text: m.content },
+          ],
+        };
+      }
+      return m;
+    });
+    const res = await axios.post('https://api.anthropic.com/v1/messages', {
+      model, max_tokens: 4096, system, messages: userMessages,
+    }, {
+      headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+      timeout: 120000,
+    });
+    return res.data.content[0].text;
+  }
+
+  if (provider.name === 'google') {
+    const contents = messages.filter(m => m.role !== 'system').map(m => {
+      if (m.role === 'user' && m === messages[messages.length - 1]) {
+        return {
+          role: 'user',
+          parts: [
+            { inlineData: { mimeType, data: imageBase64 } },
+            { text: m.content },
+          ],
+        };
+      }
+      return { role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] };
+    });
+    const systemInstruction = messages.find(m => m.role === 'system');
+    const body = { contents };
+    if (systemInstruction) body.systemInstruction = { parts: [{ text: systemInstruction.content }] };
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`;
+    const res = await axios.post(url, body, { headers: { 'Content-Type': 'application/json' }, timeout: 120000 });
+    return res.data.candidates[0].content.parts[0].text;
+  }
+
+  // OpenAI-compatible (OpenAI, Moonshot, Together, MiniMax)
+  const resolvedModel = provider.modelMap?.[model] || model;
+  const visionMessages = messages.map(m => {
+    if (m.role === 'user' && m === messages[messages.length - 1]) {
+      return {
+        role: 'user',
+        content: [
+          { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
+          { type: 'text', text: m.content },
+        ],
+      };
+    }
+    return m;
+  });
+  const res = await axios.post(provider.url, {
+    model: resolvedModel, messages: visionMessages, max_tokens: 4096, temperature: 0.7,
+  }, { headers: { 'Content-Type': 'application/json', ...provider.authHeader(key) }, timeout: 120000 });
+  const content = res.data.choices[0].message.content;
+  return content.replace(/<think>[\s\S]*?<\/think>\s*/g, '').trim();
+}
+
 function getAllModels() {
   return Object.values(PROVIDERS).flatMap(p => p.models);
 }
@@ -132,4 +220,4 @@ function getAvailableModels() {
   });
 }
 
-module.exports = { chat, getAllModels, getAvailableModels, getProviderForModel };
+module.exports = { chat, chatWithVision, supportsVision, getAllModels, getAvailableModels, getProviderForModel };

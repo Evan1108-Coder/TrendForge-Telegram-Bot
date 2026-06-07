@@ -1,6 +1,6 @@
 {
   "name": "trendforge-telegram-bot",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "description": "AI-powered Telegram bot that monitors GitHub Trending & Hacker News, generates personalized project ideas",
   "main": "src/index.js",
   "scripts": {
@@ -24,6 +24,8 @@
     "cheerio": "^1.2.0",
     "dotenv": "^17.4.2",
     "grammy": "^1.43.0",
-    "node-cron": "^4.2.1"
+    "mammoth": "^1.12.0",
+    "node-cron": "^4.2.1",
+    "pdf-parse": "^1.1.1"
   }
 }

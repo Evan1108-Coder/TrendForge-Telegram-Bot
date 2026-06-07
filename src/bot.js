@@ -1,7 +1,7 @@
 const { Bot } = require('grammy');
 const { execSync } = require('child_process');
 const axios = require('axios');
-const { chat, getAllModels, getAvailableModels } = require('./llm/providers');
+const { chat, chatWithVision, supportsVision, getAllModels, getAvailableModels } = require('./llm/providers');
 const { loadPreferences, updatePreferences } = require('./preferences');
 const { restartCron, scheduleLabel } = require('./cron');
 const { addSchedule, removeSchedule, listSchedules, restartAllSchedules } = require('./schedules');
@@ -13,6 +13,7 @@ const { fetchProductHunt } = require('./scrapers/producthunt');
 const { fetchDevToByInterests } = require('./scrapers/devto');
 const { withRetry } = require('./utils/retry');
 const { cleanOutput, sendLong } = require('./utils/format');
+const { classifyFile, downloadTelegramFile, extractText, getImageBase64, getMimeType, getSupportedExtensions } = require('./files');
 
 function createBot(token) {
   const bot = new Bot(token);
@@ -35,9 +36,10 @@ function createBot(token) {
   bot.command('start', async (ctx) => {
     console.log(`[Bot] /start from ${ctx.from.first_name} (${ctx.from.id}), chat ${ctx.chat.id}`);
     await ctx.reply(
-      '🔨 Welcome to TrendForge v3.1!\n\n' +
+      '🔨 Welcome to TrendForge v3.2!\n\n' +
       'I\'m your AI-powered tech assistant. I can:\n\n' +
       '- Fetch trends from GitHub, HN, Reddit, Product Hunt, Dev.to\n' +
+      '- Analyze files you send me (text, PDF, DOCX, images, code)\n' +
       '- Set up complex schedules (multiple daily reports, bimonthly patterns, etc.)\n' +
       '- Set reminders\n' +
       '- Save and recall notes\n' +
@@ -46,37 +48,66 @@ function createBot(token) {
       '- Manage your preferences\n\n' +
       'Just talk to me naturally! Examples:\n' +
       '- "What\'s trending on GitHub?"\n' +
+      '- Send a file and ask "Summarize this"\n' +
+      '- Reply to my message to continue a thread\n' +
       '- "Report me 2 times a day"\n' +
-      '- "Remind me in 30 minutes to check the deploy"\n' +
-      '- "Save a note about my project idea"\n' +
-      '- "Show all my schedules"\n\n' +
+      '- "Remind me in 30 minutes to check the deploy"\n\n' +
       'I figure out what to do from your message -- no commands needed!'
     );
   });
 
-  bot.on('message:text', (ctx) => {
-    const text = ctx.message.text;
-    if (text === '/start') return;
+  function buildMessageContext(ctx) {
+    const msg = ctx.message;
+    let text = msg.text || msg.caption || '';
+    const parts = [];
 
-    const chatId = ctx.chat.id;
+    if (msg.reply_to_message) {
+      const reply = msg.reply_to_message;
+      const replyText = reply.text || reply.caption || '';
+      if (replyText) {
+        const replyFrom = reply.from?.first_name || 'someone';
+        parts.push(`[Replying to ${replyFrom}: "${replyText.substring(0, 300)}"]`);
+      }
+    }
 
+    if (msg.forward_origin || msg.forward_from || msg.forward_from_chat) {
+      const fwdName = msg.forward_from?.first_name || msg.forward_from_chat?.title || 'unknown';
+      parts.push(`[Forwarded from ${fwdName}]`);
+    }
+
+    if (msg.sticker) {
+      const emoji = msg.sticker.emoji || '';
+      parts.push(`[Sticker: ${emoji} "${msg.sticker.set_name || 'custom'}"]`);
+    }
+
+    if (msg.emoji) {
+      parts.push(`[Emoji: ${msg.emoji}]`);
+    }
+
+    if (parts.length > 0) {
+      text = parts.join(' ') + (text ? '\n' + text : '');
+    }
+
+    return text;
+  }
+
+  function queueMessage(ctx, chatId, payload) {
     if (processing.has(chatId)) {
-      if (!messageQueue.has(chatId)) messageQueue.set(chatId, { messages: [], ctx });
-      const queue = messageQueue.get(chatId);
-      queue.messages.push(text);
-      queue.ctx = ctx;
+      if (!messageQueue.has(chatId)) messageQueue.set(chatId, { items: [], ctx });
+      messageQueue.get(chatId).items.push(payload);
+      messageQueue.get(chatId).ctx = ctx;
       return;
     }
 
     processing.add(chatId);
     (async () => {
       try {
-        await processMessages(ctx, chatId, [text]);
+        await processPayload(ctx, chatId, payload);
 
-        while (messageQueue.has(chatId) && messageQueue.get(chatId).messages.length > 0) {
+        while (messageQueue.has(chatId) && messageQueue.get(chatId).items.length > 0) {
           const queue = messageQueue.get(chatId);
-          const msgs = queue.messages.splice(0);
-          await processMessages(queue.ctx, chatId, msgs);
+          const item = queue.items.shift();
+          await processPayload(queue.ctx, chatId, item);
         }
       } catch (err) {
         console.error('[Bot] Unhandled processing error:', err.message);
@@ -85,10 +116,143 @@ function createBot(token) {
         messageQueue.delete(chatId);
       }
     })();
+  }
+
+  bot.on('message:text', (ctx) => {
+    if (ctx.message.text === '/start') return;
+    const chatId = ctx.chat.id;
+    const text = buildMessageContext(ctx);
+    queueMessage(ctx, chatId, { type: 'text', text });
   });
 
-  async function processMessages(ctx, chatId, messages) {
-    const combinedText = messages.length === 1 ? messages[0] : messages.join('\n');
+  bot.on('message:sticker', (ctx) => {
+    const chatId = ctx.chat.id;
+    const emoji = ctx.message.sticker.emoji || '🙂';
+    const setName = ctx.message.sticker.set_name || 'custom';
+    queueMessage(ctx, chatId, { type: 'text', text: `[Sticker: ${emoji} from "${setName}"]` });
+  });
+
+  bot.on(['message:document', 'message:photo'], async (ctx) => {
+    const chatId = ctx.chat.id;
+    const msg = ctx.message;
+
+    let fileId, fileName;
+    if (msg.document) {
+      fileId = msg.document.file_id;
+      fileName = msg.document.file_name || 'file';
+    } else if (msg.photo) {
+      const largest = msg.photo[msg.photo.length - 1];
+      fileId = largest.file_id;
+      fileName = 'photo.jpg';
+    }
+
+    const caption = buildMessageContext(ctx);
+    const fileType = classifyFile(fileName);
+
+    if (!fileType && msg.document) {
+      await ctx.reply(`I don't support that file type yet. Supported: ${getSupportedExtensions().join(', ')}`);
+      return;
+    }
+
+    queueMessage(ctx, chatId, {
+      type: 'file',
+      fileId,
+      fileName,
+      fileType: fileType || 'image',
+      caption: caption || 'Analyze this file',
+    });
+  });
+
+  async function processPayload(ctx, chatId, payload) {
+    if (payload.type === 'file') {
+      await processFileMessage(ctx, chatId, payload);
+    } else {
+      await processTextMessage(ctx, chatId, payload.text);
+    }
+  }
+
+  async function processFileMessage(ctx, chatId, payload) {
+    const prefs = loadPreferences();
+    const available = getAvailableModels();
+    const allModels = getAllModels();
+    const model = available.includes(prefs.model) ? prefs.model : available[0];
+    if (!model) { await ctx.reply('No AI model available.'); return; }
+
+    try {
+      const { buffer, fileName: dlName } = await downloadTelegramFile(bot, payload.fileId);
+      const fileName = payload.fileName || dlName;
+
+      if (payload.fileType === 'image') {
+        const base64 = getImageBase64(buffer);
+        const mimeType = getMimeType(fileName);
+
+        if (supportsVision(model)) {
+          addToHistory(chatId, 'user', `[Sent image: ${fileName}] ${payload.caption}`);
+          const history = getHistory(chatId);
+          const systemPrompt = buildSystemPrompt(prefs, allModels);
+          const response = await chatWithVision(model, [
+            { role: 'system', content: systemPrompt },
+            ...history,
+          ], base64, mimeType);
+          const cleaned = cleanOutput(response) || 'I analyzed the image but couldn\'t generate a description.';
+          addToHistory(chatId, 'assistant', cleaned);
+          await sendLong(ctx, cleaned);
+        } else {
+          await ctx.reply(`The current model (${model}) doesn't support image analysis. Switch to a vision model like gpt-4o, claude-sonnet-4-6, or gemini-3-flash for image support.`);
+        }
+        return;
+      }
+
+      const text = await extractText(buffer, fileName);
+      if (!text) {
+        await ctx.reply(`Couldn't extract text from ${fileName}. The file might be empty or in an unsupported format.`);
+        return;
+      }
+
+      const truncated = text.length > 10000 ? text.substring(0, 10000) + '\n[... truncated]' : text;
+      const userMsg = `[File uploaded: ${fileName} (${buffer.length} bytes)]\n\nFile content:\n${truncated}\n\nUser's request: ${payload.caption}`;
+      addToHistory(chatId, 'user', userMsg);
+
+      const history = getHistory(chatId);
+      const systemPrompt = buildSystemPrompt(prefs, allModels);
+      const response = await chat(model, [
+        { role: 'system', content: systemPrompt },
+        ...history,
+      ]);
+
+      const parsed = parseResponse(response);
+      if (parsed.actions.length > 0) {
+        const results = await executeActions(parsed.actions, prefs, ctx, chatId);
+        const hasData = results.some(r => r.type === 'data');
+        if (hasData) {
+          const ack = cleanOutput(parsed.cleanText) || 'Processing...';
+          await ctx.reply(ack);
+          const resultsText = formatActionResults(results);
+          const phase2 = await chat(model, [
+            { role: 'system', content: systemPrompt }, ...history,
+            { role: 'assistant', content: ack },
+            { role: 'user', content: `[Action results]\n\n${resultsText}\n\nProvide your detailed response. Plain text only.` },
+          ]);
+          const cleaned = cleanOutput(phase2) || 'Done processing.';
+          addToHistory(chatId, 'assistant', cleaned);
+          await sendLong(ctx, cleaned);
+        } else {
+          const cleaned = cleanOutput(parsed.cleanText) || generateConfirmation(results);
+          addToHistory(chatId, 'assistant', cleaned);
+          await sendLong(ctx, cleaned);
+        }
+      } else {
+        const cleaned = cleanOutput(parsed.cleanText) || 'I analyzed the file but couldn\'t generate a summary.';
+        addToHistory(chatId, 'assistant', cleaned);
+        await sendLong(ctx, cleaned);
+      }
+    } catch (err) {
+      console.error('[Bot] File processing error:', err.message);
+      await ctx.reply(`Error processing file: ${err.message}`);
+    }
+  }
+
+  async function processTextMessage(ctx, chatId, combinedText) {
     addToHistory(chatId, 'user', combinedText);
 
     const prefs = loadPreferences();
@@ -255,7 +419,7 @@ function createBot(token) {
           const resp = await axios.get(url, {
             timeout: 15000,
             maxContentLength: 100000,
-            headers: { 'User-Agent': 'TrendForge/3.1' },
+            headers: { 'User-Agent': 'TrendForge/3.2' },
           });
           let content;
           if (typeof resp.data === 'string') {
@@ -377,7 +541,20 @@ function createBot(token) {
       ? customSchedules.map(s => `  - ${s.name}: ${s.description} [${s.cron}] (${s.enabled ? 'ON' : 'OFF'})`).join('\n')
       : '  (none)';
 
-    return `You are TrendForge, an intelligent tech assistant running as a Telegram bot. You help users with tech trends, project ideas, scheduling, reminders, notes, and general tech conversation.
+    return `You are TrendForge, an intelligent tech assistant running as a Telegram bot. You help users with tech trends, project ideas, scheduling, reminders, notes, file analysis, and general tech conversation.
+
+FILE ANALYSIS:
+Users can send files directly in Telegram. You'll receive their content inline. Supported types:
+- Text/markup: .txt, .md, .csv, .json, .html
+- Documents: .pdf, .docx
+- Images: .png, .jpg, .jpeg, .avif (requires vision-capable model)
+When you receive file content, analyze it thoroughly and respond to the user's question about it.
+
+TELEGRAM FEATURES:
+- When the user replies to your message, context from the replied message is included as [Replying to ...]
+- Forwarded messages include [Forwarded from ...] context
+- Stickers are shown as [Sticker: emoji "set_name"]
+- Respond naturally to all of these -- acknowledge replies, react to stickers with matching energy, etc.
 
 ACTIONS SYSTEM:
 You can perform actions by including an [ACTIONS] block at the END of your message. It contains a JSON array of action objects.
