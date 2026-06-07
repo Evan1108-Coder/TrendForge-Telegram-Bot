@@ -1,4 +1,4 @@
-# TrendForge Telegram Bot v2.0
+# TrendForge Telegram Bot v3.2
 
 > Status: beta. The bot is designed for daily developer trend discovery, but source quality depends on each upstream platform and API/feed availability.
 
@@ -24,7 +24,10 @@ AI-powered Telegram bot that monitors **5 data sources** daily — GitHub Trendi
 
 - **5 Data Sources** — GitHub Trending, Hacker News, Reddit (programming communities), Product Hunt, and Dev.to
 - **Daily Trend Reports** — Automated 6AM HKT briefing combining all sources with AI analysis
-- **Multi-Model LLM** — Supports 16 models across OpenAI, Anthropic, Google, Together AI, and MiniMax
+- **Multi-Model LLM** — Supports 21 models across OpenAI, Anthropic, Google, Together AI, MiniMax, and Moonshot/Kimi
+- **File Analysis** — Send text files (.txt, .md, .csv, .json, .html), documents (.pdf, .docx), or images (.png, .jpg, .jpeg, .avif) for AI-powered analysis
+- **Vision Support** — Image analysis with vision-capable models (GPT-4o, Claude, Gemini, Kimi)
+- **Telegram Features** — Reply context, forwarded messages, stickers, and emoji handling for natural conversations
 - **Natural Conversation** — Chat naturally about tech trends, get project ideas, discuss what's hot
 - **Personalized Filtering** — Set your interests, preferred languages, and idea style. Scrapers adapt to your preferences
 - **AI Error Explanations** — When something goes wrong, the bot explains what happened and how to fix it
@@ -41,6 +44,7 @@ AI-powered Telegram bot that monitors **5 data sources** daily — GitHub Trendi
 | Google | gemini-3.1-pro, gemini-3-flash, gemini-2.5-flash-lite |
 | Together AI | llama-4-maverick, llama-4-scout, llama-3.3-70b |
 | MiniMax | minimax-m2.7, minimax-m2.5-lightning |
+| Moonshot/Kimi | kimi-latest, kimi-k2-thinking, kimi-k2-turbo-preview, kimi-k2.5-vision, moonshot-v1-128k |
 
 ## Commands
 
@@ -88,12 +92,13 @@ See [SETUP.md](SETUP.md) for detailed installation instructions.
 ```
 src/
   index.js          - Entry point
-  bot.js            - Telegram bot (grammy) with commands and conversation
+  bot.js            - Telegram bot (grammy) with commands, conversation, and file handling
+  files.js          - File analysis module (text, PDF, DOCX, image extraction)
   cron.js           - Daily report scheduler (6AM HKT)
   report.js         - Report generation combining all 5 scrapers + LLM
   preferences.js    - Taste profile management
   llm/
-    providers.js    - Multi-provider LLM abstraction layer
+    providers.js    - Multi-provider LLM abstraction layer (21 models, vision support)
   scrapers/
     github.js       - GitHub Trending scraper (preference-aware, multi-language)
     hackernews.js   - Hacker News Firebase API client
