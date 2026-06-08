@@ -1,4 +1,18 @@
-# TrendForge Telegram Bot v3.2
+# TrendForge Telegram Bot
+
+> Turns real developer signals from GitHub, Hacker News, Reddit, Product Hunt, and Dev.to into daily Telegram project briefs.
+
+![Status](https://img.shields.io/badge/status-beta-6b7280) ![License](https://img.shields.io/github/license/Evan1108-Coder/TrendForge-Telegram-Bot) ![CI](https://img.shields.io/github/actions/workflow/status/Evan1108-Coder/TrendForge-Telegram-Bot/ci.yml?branch=main&label=CI)
+
+**JavaScript Telegram bot • multi-source trend collector • LLM-assisted idea ranking**
+
+## At a Glance
+
+- Real project documentation now includes security, contribution, changelog, CI, and issue/PR workflows.
+- Maintenance snapshot: see [docs/project-snapshot.md](docs/project-snapshot.md) for a generated file-mix chart and repository checklist.
+- Public repo: https://github.com/Evan1108-Coder/TrendForge-Telegram-Bot
+
+---
 
 > Status: beta. The bot is designed for daily developer trend discovery, but source quality depends on each upstream platform and API/feed availability.
 
