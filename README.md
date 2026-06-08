@@ -14,6 +14,15 @@
 
 ---
 
+
+## Real Visual Snapshot
+
+These visuals are generated from the actual repository structure and project workflow, not placeholders.
+
+![Repository file mix](docs/assets/repo-file-mix.svg)
+
+![Project workflow](docs/assets/workflow.svg)
+
 > Status: beta. The bot is designed for daily developer trend discovery, but source quality depends on each upstream platform and API/feed availability.
 
 TrendForge is for builders who want project ideas from real developer signals instead of generic AI brainstorming.
