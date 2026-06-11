@@ -4,6 +4,7 @@ const axios = require('axios');
 const { version: VERSION } = require('../package.json');
 const { chat, chatWithVision, supportsVision, getAllModels, getAvailableModels, getProviderStatus, getProviderForModel } = require('./llm/providers');
 const { handleError } = require('./errors');
+const { checkForUpdate, applyUpdate, formatUpdateNotice } = require('./update');
 const { loadPreferences, updatePreferences } = require('./preferences');
 const { restartCron, stopCron, scheduleLabel } = require('./cron');
 const { addSchedule, removeSchedule, listSchedules, restartAllSchedules } = require('./schedules');
@@ -40,6 +41,7 @@ const COMMAND_MENU = [
   { command: 'pause', description: 'Pause automatic reports' },
   { command: 'resume', description: 'Resume automatic reports' },
   { command: 'config', description: 'API keys & provider status' },
+  { command: 'update', description: 'Update to the latest GitHub version' },
   { command: 'restart', description: 'Restart the bot' },
 ];
 
@@ -62,6 +64,7 @@ const HELP_TEXT =
   'SYSTEM\n' +
   '/status — uptime, model, schedule\n' +
   '/version — version & build\n' +
+  '/update — pull the latest version from GitHub & restart\n' +
   '/restart — restart the bot\n\n' +
   'You can also just talk to me naturally for anything else.';
 
@@ -89,6 +92,7 @@ function createBot(token) {
   const messageQueue = new Map();
   const processing = new Set();
   const activeReminders = new Map();
+  let updateInProgress = false;
 
   function getHistory(chatId) {
     if (!conversationHistory.has(chatId)) conversationHistory.set(chatId, []);
@@ -180,6 +184,76 @@ function createBot(token) {
         console.error('[Bot] /restart failed:', e.message);
       }
     }, 800);
+  });
+
+  bot.command('update', async (ctx) => {
+    console.log(`[Bot] /update requested by ${ctx.from?.id}`);
+    if (updateInProgress) {
+      await ctx.reply('⏳ An update is already in progress — hang tight.');
+      return;
+    }
+    updateInProgress = true;
+    try {
+      await ctx.reply('🔎 Checking GitHub for a newer version…');
+
+      // The check does a network fetch and may throw (offline, not a git
+      // checkout). Route genuine exceptions through the AI error explainer.
+      let info;
+      try {
+        info = checkForUpdate();
+      } catch (e) {
+        console.error('[Bot] /update check failed:', e.message);
+        const explanation = await handleError({ err: e, where: 'checking for a TrendForge update' });
+        await sendLong(ctx, explanation);
+        return;
+      }
+
+      if (!info.available) {
+        await ctx.reply(`✅ Already on the latest version${info.localVersion ? ` (v${info.localVersion})` : ''}. Nothing to update.`);
+        return;
+      }
+
+      const verLine = info.localVersion && info.remoteVersion && info.localVersion !== info.remoteVersion
+        ? `v${info.localVersion} → v${info.remoteVersion}`
+        : `${info.behind} new commit${info.behind === 1 ? '' : 's'}`;
+      const changes = info.changelog && info.changelog.length
+        ? '\n\nWhat\'s changing:\n' + info.changelog.slice(0, 8).map((c) => `• ${c}`).join('\n')
+        : '';
+      await ctx.reply(`⬇️ Update found (${verLine}). Pulling, health-checking and applying now…${changes}`);
+
+      // applyUpdate never throws; it returns a structured, already-friendly
+      // result for each stage (incl. auto-rollback on a bad boot).
+      const result = applyUpdate();
+
+      if (!result.ok) {
+        console.error(`[Bot] /update failed at ${result.stage}:`, result.message);
+        const rolled = result.rolledBack ? ' Your bot is still running the previous working version.' : '';
+        await sendLong(ctx, `⚠️ Update could not be applied (${result.stage}): ${result.message}${rolled}`);
+        return;
+      }
+
+      if (!result.updated) {
+        await ctx.reply('✅ Already up to date.');
+        return;
+      }
+
+      const dp = result.dataProtected;
+      const dataNote = dp && dp.allProtected
+        ? 'All your data (settings, memories, schedules, notes) is preserved.'
+        : (dp ? `⚠️ Heads up: these files are NOT gitignored and could be affected: ${dp.unprotected.join(', ')}.` : '');
+      await ctx.reply(`✅ Updated${result.remoteVersion ? ` to v${result.remoteVersion}` : ''} and health check passed. ${dataNote}\n♻️ Restarting now to run the new version…`);
+
+      // Let Telegram flush the reply, then let pm2 respawn us on the new code.
+      setTimeout(() => {
+        try {
+          execSync(`pm2 restart ${PM2_NAME}`, { timeout: 15000 });
+        } catch (e) {
+          console.error('[Bot] /update restart failed:', e.message);
+        }
+      }, 1000);
+    } finally {
+      updateInProgress = false;
+    }
   });
 
   bot.command('report', async (ctx) => {

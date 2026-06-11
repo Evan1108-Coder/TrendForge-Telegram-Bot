@@ -4,9 +4,53 @@ const { loadPreferences } = require('./preferences');
 const { startAllSchedules, restartAllSchedules, stopAllSchedules } = require('./schedules');
 const { sendReportHTML } = require('./render');
 const { handleError } = require('./errors');
+const { checkForUpdate, formatUpdateNotice } = require('./update');
 
 let currentJob = null;
 let botRef = null;
+let updateCheckJob = null;
+// Remote commit we last told the user about, so the recurring check doesn't
+// re-notify for the same pending update every interval.
+let lastNotifiedRemote = null;
+
+// How often to check GitHub for a new version (every 6 hours).
+const UPDATE_CHECK_CRON = '0 */6 * * *';
+
+async function checkForUpdateAndNotify(bot) {
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!chatId) return;
+  let info;
+  try {
+    info = checkForUpdate();
+  } catch (e) {
+    // Auto-checks fail quietly (e.g. offline) — never spam the user about a
+    // background check that couldn't run.
+    console.error('[CRON] Update check skipped:', e.message);
+    return;
+  }
+  if (!info.available) return;
+  if (info.remote === lastNotifiedRemote) return; // already announced this one
+  lastNotifiedRemote = info.remote;
+  try {
+    await bot.api.sendMessage(chatId, formatUpdateNotice(info));
+    console.log(`[CRON] Notified user of available update (${info.remoteVersion || info.behind + ' commits'}).`);
+  } catch (e) {
+    console.error('[CRON] Could not send update notice:', e.message);
+  }
+}
+
+function startUpdateChecker(bot) {
+  if (updateCheckJob) {
+    updateCheckJob.stop();
+    updateCheckJob = null;
+  }
+  const prefs = loadPreferences();
+  updateCheckJob = cron.schedule(UPDATE_CHECK_CRON, () => {
+    console.log('[CRON] Running scheduled update check…');
+    checkForUpdateAndNotify(bot);
+  }, { timezone: prefs.timezone || 'Asia/Hong_Kong' });
+  console.log(`[CRON] Update checker active [${UPDATE_CHECK_CRON}]`);
+}
 
 function scheduleLabel(prefs) {
   if (prefs.reportEnabled === false) return 'Disabled';
@@ -39,6 +83,10 @@ function startCron(bot) {
   const prefs = loadPreferences();
 
   startAllSchedules(bot);
+
+  // Update checking is independent of report pausing — keep watching for new
+  // versions even when automatic reports are muted.
+  startUpdateChecker(bot);
 
   if (prefs.paused) {
     console.log('[CRON] Paused — no automatic reports until /resume');
@@ -79,6 +127,8 @@ function stopCron() {
     currentJob.stop();
     currentJob = null;
   }
+  // Note: the update checker is intentionally NOT stopped here — it runs
+  // independently of report pausing (startUpdateChecker self-dedups on restart).
   stopAllSchedules();
 }
 

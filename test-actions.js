@@ -627,6 +627,138 @@ const mockDeps = (over = {}) => ({
     assert(typeof out === 'string' && out.length > 0, 'returns a non-empty string');
   });
 
+  // === ROUND 7: self-update (v3.5) ===
+  const upd = require('./src/update');
+
+  // A fake git/npm runner so update tests never touch a real repo, network or npm.
+  function fakeRunner(cfg = {}) {
+    const state = {
+      head: cfg.head || 'aaa111',
+      remote: cfg.remote || (cfg.upToDate ? (cfg.head || 'aaa111') : 'bbb222'),
+      calls: [], npmRuns: 0, resets: [],
+    };
+    const run = (cmd) => {
+      state.calls.push(cmd);
+      if (cmd.includes('--is-inside-work-tree')) {
+        if (cfg.notGit) throw new Error('not a git repository');
+        return 'true\n';
+      }
+      if (cmd.includes('status --porcelain')) return cfg.dirty ? ' M src/foo.js\n' : '\n';
+      if (cmd.includes('git fetch')) { if (cfg.fetchFails) throw new Error('network is unreachable'); return ''; }
+      if (cmd.includes('rev-parse HEAD')) return state.head + '\n';
+      if (cmd.includes('rev-parse origin/main')) return state.remote + '\n';
+      if (cmd.includes('rev-list --count')) return String(cfg.behind != null ? cfg.behind : 2) + '\n';
+      if (cmd.includes('git log')) return (cfg.changelog || []).join('\n') + '\n';
+      if (cmd.includes('git show origin/main:package.json')) return JSON.stringify({ version: cfg.remoteVersion || '9.9.9' });
+      if (cmd.includes('git pull')) { if (cfg.pullFails) throw new Error('pull conflict'); state.head = state.remote; return 'Updating\n'; }
+      if (cmd.includes('git diff --name-only')) return (cfg.depsChanged ? 'package.json\nsrc/x.js' : 'src/x.js') + '\n';
+      if (cmd.includes('npm install')) { state.npmRuns++; if (cfg.npmFails) throw new Error('npm ERR! install failed'); return ''; }
+      if (cmd.includes('git reset --hard')) { state.resets.push(cmd); state.head = cfg.head || 'aaa111'; return ''; }
+      if (cmd.includes('git check-ignore')) {
+        const file = cmd.split(' ').pop();
+        if ((cfg.unignored || []).includes(file)) throw new Error('not ignored');
+        return file + '\n';
+      }
+      return '';
+    };
+    return { run, state };
+  }
+
+  console.log('\n=== ROUND 7: self-update (v3.5) ===\n');
+
+  test('checkForUpdate: detects an available update', () => {
+    const { run } = fakeRunner({ head: 'aaa', remote: 'bbb', behind: 3, changelog: ['feat x', 'fix y'], remoteVersion: '3.6.0' });
+    const info = upd.checkForUpdate({ run, localVersion: '3.5.0' });
+    assert(info.available === true, 'should be available');
+    assert(info.behind === 3, `behind=${info.behind}`);
+    assert(info.changelog.length === 2, 'changelog parsed');
+    assert(info.remoteVersion === '3.6.0' && info.localVersion === '3.5.0', 'versions resolved');
+  });
+
+  test('checkForUpdate: no false-positive when already up to date', () => {
+    const { run } = fakeRunner({ head: 'same', remote: 'same' });
+    const info = upd.checkForUpdate({ run, localVersion: '3.5.0' });
+    assert(info.available === false, 'not available when HEAD === origin/main');
+    assert(info.behind === 0, 'behind should be 0');
+  });
+
+  test('checkForUpdate: throws clearly when not a git checkout', () => {
+    const { run } = fakeRunner({ notGit: true });
+    let threw = false;
+    try { upd.checkForUpdate({ run }); } catch (e) { threw = true; assert(e.kind === 'not_git', `kind=${e.kind}`); }
+    assert(threw, 'should throw on non-git');
+  });
+
+  test('dataFilesProtected: all user-data files are gitignored', () => {
+    const { run } = fakeRunner({});
+    const dp = upd.dataFilesProtected({ run });
+    assert(dp.allProtected === true, `unprotected: ${dp.unprotected.join(',')}`);
+    assert(dp.protected.includes('.env') && dp.protected.includes('memories.json'), 'env + memories protected');
+  });
+
+  test('dataFilesProtected: flags a file that is NOT ignored', () => {
+    const { run } = fakeRunner({ unignored: ['memories.json'] });
+    const dp = upd.dataFilesProtected({ run });
+    assert(dp.allProtected === false, 'should not be all-protected');
+    assert(dp.unprotected.includes('memories.json'), 'memories.json flagged as at-risk');
+  });
+
+  test('applyUpdate: happy path updates; no npm when deps unchanged', () => {
+    const { run, state } = fakeRunner({ head: 'aaa', remote: 'bbb', depsChanged: false, remoteVersion: '3.6.0' });
+    const result = upd.applyUpdate({ run, healthCheck: () => ({ ok: true }) });
+    assert(result.ok === true && result.updated === true, `result: ${JSON.stringify(result)}`);
+    assert(state.npmRuns === 0, 'npm must NOT run when deps unchanged');
+    assert(state.resets.length === 0, 'no rollback on success');
+    assert(result.dataProtected.allProtected === true, 'reports data preserved');
+  });
+
+  test('applyUpdate: installs deps when package.json changed', () => {
+    const { run, state } = fakeRunner({ head: 'aaa', remote: 'bbb', depsChanged: true });
+    const result = upd.applyUpdate({ run, healthCheck: () => ({ ok: true }) });
+    assert(result.ok === true && result.depsInstalled === true, 'deps installed flag set');
+    assert(state.npmRuns === 1, `npm should run once, ran ${state.npmRuns}`);
+  });
+
+  test('applyUpdate: rolls back when the new code fails its health check', () => {
+    const { run, state } = fakeRunner({ head: 'aaa', remote: 'bbb', depsChanged: false });
+    const result = upd.applyUpdate({ run, healthCheck: () => ({ ok: false, output: 'SyntaxError: bad' }) });
+    assert(result.ok === false && result.rolledBack === true, `result: ${JSON.stringify(result)}`);
+    assert(result.reason === 'bad_boot', `reason=${result.reason}`);
+    assert(state.resets.length === 1 && state.resets[0].includes('aaa'), 'reset --hard back to prevHead');
+  });
+
+  test('applyUpdate: refuses on a dirty working tree (never pulls)', () => {
+    const { run, state } = fakeRunner({ dirty: true });
+    const result = upd.applyUpdate({ run, healthCheck: () => ({ ok: true }) });
+    assert(result.ok === false && result.reason === 'dirty_tree', `result: ${JSON.stringify(result)}`);
+    assert(!state.calls.some((c) => c.includes('git pull')), 'must not pull on a dirty tree');
+  });
+
+  test('applyUpdate: rolls back when npm install fails', () => {
+    const { run, state } = fakeRunner({ head: 'aaa', remote: 'bbb', depsChanged: true, npmFails: true });
+    const result = upd.applyUpdate({ run, healthCheck: () => ({ ok: true }) });
+    assert(result.ok === false && result.reason === 'npm_failed' && result.rolledBack === true, `result: ${JSON.stringify(result)}`);
+    assert(state.resets.length >= 1, 'rolled back after npm failure');
+  });
+
+  test('depsChangedBetween: true when package.json is in the diff', () => {
+    const { run } = fakeRunner({ depsChanged: true });
+    assert(upd.depsChangedBetween(run, 'aaa', 'bbb') === true);
+  });
+
+  test('depsChangedBetween: false when only source changed', () => {
+    const { run } = fakeRunner({ depsChanged: false });
+    assert(upd.depsChangedBetween(run, 'aaa', 'bbb') === false);
+  });
+
+  test('formatUpdateNotice: shows version, changelog and how to apply', () => {
+    const msg = upd.formatUpdateNotice({ available: true, behind: 2, changelog: ['feat: a', 'fix: b'], localVersion: '3.5.0', remoteVersion: '3.6.0' });
+    assert(msg.includes('v3.5.0') && msg.includes('v3.6.0'), 'shows version transition');
+    assert(msg.includes('feat: a'), 'changelog included');
+    assert(msg.includes('/update'), 'tells the user how to apply');
+    assert(/kept|preserv/i.test(msg), 'reassures data is preserved');
+  });
+
   // Clean up test data
   console.log('\n--- Cleanup ---');
   if (fs.existsSync(memFile)) fs.unlinkSync(memFile);
