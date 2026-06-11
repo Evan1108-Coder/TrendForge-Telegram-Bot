@@ -6,38 +6,97 @@ const { fetchDevToByInterests } = require('./scrapers/devto');
 const { chat, getAvailableModels } = require('./llm/providers');
 const { loadPreferences } = require('./preferences');
 const { withRetry } = require('./utils/retry');
-const { cleanOutput } = require('./utils/format');
+const {
+  buildCandidates,
+  parseModelJson,
+  renderFullReport,
+  renderFallbackReport,
+} = require('./render');
+
+const SOURCE_LABELS = { github: 'GitHub', hn: 'HN', reddit: 'Reddit', ph: 'PH', devto: 'Dev.to' };
+
+function dateLabel(timezone) {
+  try {
+    return new Date().toLocaleDateString('en-US', {
+      timeZone: timezone || 'Asia/Hong_Kong',
+      month: 'short',
+      day: 'numeric',
+    });
+  } catch {
+    return new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  }
+}
+
+// Ask the model for a SMALL structured payload. It only writes prose; every
+// fact (titles, links, metrics) is resolved from our data by id afterwards.
+function buildPrompt(prefs, candidateList) {
+  return `You are TrendForge, a sharp daily tech-trend curator writing a SHORT briefing for one reader.
+
+READER PROFILE
+- Interests: ${prefs.interests.join(', ')}
+- Preferred languages: ${prefs.languages.join(', ')}
+- Avoid topics: ${prefs.avoidTopics.length ? prefs.avoidTopics.join(', ') : 'none'}
+
+TODAY'S CANDIDATES (one per line: "id | source | title | metric | description")
+${candidateList}
+
+Rank the SINGLE BEST 5 items for this reader across ALL sources COMBINED — one overall Top 5, not a per-source list. Be selective and varied; don't pick 5 of the same kind.
+
+Return ONLY a JSON object (no prose, no markdown, no code fences) with EXACTLY this shape:
+{
+  "tldr": ["1-2 short, plain lines — the gist of today if they read nothing else"],
+  "top_5": [
+    {"id": "<candidate id, e.g. gh3>", "summary": "a MEDIUM description: about 2 sentences (not a one-liner, not a paragraph). Say what it is and why it matters to THIS reader."}
+  ],
+  "signal_of_day": "2-3 clear sentences naming ONE pattern connecting items across sources today, with the reasoning behind it"
+}
+
+RULES
+- top_5: EXACTLY 5 objects, ranked best first. Each "id" MUST be a real id from the list above, and all 5 must be different. This is ONE overall cross-source ranking.
+- summary: MEDIUM length — about 2 sentences each. Not a terse one-liner, not a wall of text. Concrete and substantive.
+- tldr: REQUIRED, never empty — 1-2 short, plain lines a reader can grasp instantly. signal_of_day: clear and concise, not a wall of text.
+- summary / tldr / signal: plain text only. No URLs, no markdown, no emoji, no HTML. (The source name and link are attached automatically — don't repeat them.)
+- Base every description on the candidate's title/description provided above. Do NOT invent specific numbers, versions, dates, or facts that aren't given. Explaining and contextualizing is good; fabricating is not.`;
+}
 
 async function generateDailyReport() {
   const prefs = loadPreferences();
 
+  const limits = {
+    github: prefs.maxGitHubRepos,
+    hn: prefs.maxHNStories,
+    reddit: prefs.maxRedditPosts || 10,
+    ph: prefs.maxPHProducts || 5,
+    devto: prefs.maxDevToArticles || 5,
+  };
+
   const [githubRepos, hnStories, redditPosts, phProducts, devtoArticles] = await Promise.all([
-    withRetry(() => fetchGitHubTrendingByPrefs(prefs.languages), { label: 'GitHub' }).catch(err => {
+    withRetry(() => fetchGitHubTrendingByPrefs(prefs.languages, prefs.maxGitHubRepos), { label: 'GitHub' }).catch((err) => {
       console.error('[Report] GitHub scrape failed:', err.message);
       return [];
     }),
-    withRetry(() => fetchTopStories(), { label: 'HackerNews' }).catch(err => {
+    withRetry(() => fetchTopStories(prefs.maxHNStories), { label: 'HackerNews' }).catch((err) => {
       console.error('[Report] HN fetch failed:', err.message);
       return [];
     }),
-    withRetry(() => fetchRedditHot(), { label: 'Reddit' }).catch(err => {
+    withRetry(() => fetchRedditHot(), { label: 'Reddit' }).catch((err) => {
       console.error('[Report] Reddit fetch failed:', err.message);
       return [];
     }),
-    withRetry(() => fetchProductHunt(), { label: 'ProductHunt' }).catch(err => {
+    withRetry(() => fetchProductHunt(), { label: 'ProductHunt' }).catch((err) => {
       console.error('[Report] Product Hunt fetch failed:', err.message);
       return [];
     }),
-    withRetry(() => fetchDevToByInterests(prefs.interests), { label: 'DevTo' }).catch(err => {
+    withRetry(() => fetchDevToByInterests(prefs.interests), { label: 'DevTo' }).catch((err) => {
       console.error('[Report] Dev.to fetch failed:', err.message);
       return [];
     }),
   ]);
 
-  const totalSources = [githubRepos, hnStories, redditPosts, phProducts, devtoArticles]
-    .filter(arr => arr.length > 0).length;
+  const data = { github: githubRepos, hn: hnStories, reddit: redditPosts, ph: phProducts, devto: devtoArticles };
+  const sourcesUsed = Object.keys(SOURCE_LABELS).filter((s) => data[s] && data[s].length);
 
-  if (totalSources === 0) {
+  if (sourcesUsed.length === 0) {
     return 'Could not fetch data from any source. Will retry next cycle.';
   }
 
@@ -45,138 +104,43 @@ async function generateDailyReport() {
   const available = getAvailableModels();
   const activeModel = available.includes(model) ? model : available[0];
 
-  if (!activeModel) {
-    return formatRawReport(githubRepos, hnStories, redditPosts, phProducts, devtoArticles, prefs);
-  }
+  const meta = {
+    dateLabel: dateLabel(prefs.timezone),
+    footer: '',
+    sources: sourcesUsed.map((s) => SOURCE_LABELS[s]).join(', '),
+  };
 
+  const { idMap, list } = buildCandidates(data, limits);
+
+  if (!activeModel) {
+    meta.footer = `raw data · ${meta.sources}`;
+    return renderFallbackReport(data, meta);
+  }
   if (activeModel !== model) {
     console.log(`[Report] Model ${model} not available, falling back to ${activeModel}`);
   }
-
-  const ghSummary = githubRepos.slice(0, prefs.maxGitHubRepos).map((r, i) =>
-    `${i + 1}. ${r.name} (${r.language}, ${r.totalStars} stars, ${r.starsToday} today) - ${r.description}`
-  ).join('\n');
-
-  const hnSummary = hnStories.slice(0, prefs.maxHNStories).map((s, i) =>
-    `${i + 1}. "${s.title}" (${s.score} pts, ${s.comments} comments) - ${s.url}`
-  ).join('\n');
-
-  const redditSummary = redditPosts.slice(0, prefs.maxRedditPosts || 10).map((p, i) =>
-    `${i + 1}. [r/${p.subreddit}] "${p.title}" (${p.score} upvotes, ${p.comments} comments)`
-  ).join('\n');
-
-  const phSummary = phProducts.slice(0, prefs.maxPHProducts || 5).map((p, i) =>
-    `${i + 1}. ${p.name} - ${p.tagline} (${p.votes} upvotes)`
-  ).join('\n');
-
-  const devtoSummary = devtoArticles.slice(0, prefs.maxDevToArticles || 5).map((a, i) =>
-    `${i + 1}. "${a.title}" by ${a.author} (${a.reactions} reactions, ${a.readingTime}min read) [${a.tags.join(', ')}]`
-  ).join('\n');
-
-  const prompt = `You are TrendForge, a daily tech trend analyst. Based on the user's interests and today's trending data from 5 sources, create a detailed daily briefing.
-
-USER PROFILE:
-- Interests: ${prefs.interests.join(', ')}
-- Preferred languages: ${prefs.languages.join(', ')}
-- Avoid topics: ${prefs.avoidTopics.length ? prefs.avoidTopics.join(', ') : 'none'}
-- Idea style: ${prefs.ideaStyle}
-
-TODAY'S GITHUB TRENDING:
-${ghSummary || 'No data available'}
-
-TODAY'S HACKER NEWS TOP STORIES:
-${hnSummary || 'No data available'}
-
-TODAY'S REDDIT HOT POSTS (programming communities):
-${redditSummary || 'No data available'}
-
-TODAY'S PRODUCT HUNT:
-${phSummary || 'No data available'}
-
-TODAY'S DEV.TO TOP ARTICLES:
-${devtoSummary || 'No data available'}
-
-Generate a report with these sections:
-
-1. TOP PICKS (5-7 most relevant items across ALL sources matching user interests) - For each pick, write 2-3 sentences explaining what it is, why it matters, and why the user should care.
-
-2. PROJECT IDEAS (3-4 practical project ideas inspired by today's trends) - For each idea, describe the concept, suggested tech stack, key features, and who would use it.
-
-3. TREND SIGNALS (5-6 sentences analyzing what's hot today, drawing connections between items from different sources, identifying emerging patterns)
-
-4. PRODUCT SPOTLIGHT (2-3 interesting Product Hunt launches worth watching) - Describe what each does and what makes it stand out.
-
-FORMATTING RULES:
-- Write CLEAN PLAIN TEXT only
-- NO Markdown: no *, **, _, \`, #, []()
-- NO HTML: no <b>, <i>, <code>, etc.
-- Use emoji for section headers
-- Use numbered lists and dashes for structure
-- Be detailed and insightful, aim for a comprehensive report`;
+  meta.footer = `via ${activeModel} · ${meta.sources}`;
 
   try {
     const response = await chat(activeModel, [
-      { role: 'system', content: 'You are TrendForge, a daily tech trend analyst. Write in clean plain text only. Never use Markdown or HTML formatting. Be detailed, insightful, and actionable.' },
-      { role: 'user', content: prompt },
+      {
+        role: 'system',
+        content: 'You are TrendForge, a concise tech-trend curator. You ALWAYS reply with a single valid JSON object and nothing else.',
+      },
+      { role: 'user', content: buildPrompt(prefs, list) },
     ]);
-    const sourcesUsed = [
-      githubRepos.length > 0 && 'GitHub',
-      hnStories.length > 0 && 'HN',
-      redditPosts.length > 0 && 'Reddit',
-      phProducts.length > 0 && 'PH',
-      devtoArticles.length > 0 && 'Dev.to',
-    ].filter(Boolean).join(', ');
-    const header = `🔨 TrendForge Daily Report\nPowered by ${activeModel} | Sources: ${sourcesUsed}\n\n`;
-    return header + cleanOutput(response);
+
+    const parsed = parseModelJson(response);
+    if (!parsed) {
+      console.warn('[Report] Could not parse model JSON, using deterministic fallback render.');
+      return renderFallbackReport(data, meta);
+    }
+    return renderFullReport(parsed, idMap, meta);
   } catch (err) {
     console.error('[Report] LLM call failed:', err.message);
-    return formatRawReport(githubRepos, hnStories, redditPosts, phProducts, devtoArticles, prefs);
+    meta.footer = `raw data · ${meta.sources}`;
+    return renderFallbackReport(data, meta);
   }
-}
-
-function formatRawReport(repos, stories, redditPosts, phProducts, devtoArticles, prefs) {
-  let report = '🔨 TrendForge Daily Report\n(AI unavailable - raw data)\n\n';
-
-  if (repos.length > 0) {
-    report += '📦 GitHub Trending\n';
-    repos.slice(0, prefs.maxGitHubRepos).forEach((r, i) => {
-      report += `${i + 1}. ${r.name} (${r.language}) - ${r.description}\n`;
-    });
-    report += '\n';
-  }
-
-  if (stories.length > 0) {
-    report += '📰 Hacker News Top\n';
-    stories.slice(0, prefs.maxHNStories).forEach((s, i) => {
-      report += `${i + 1}. ${s.title} (${s.score} pts)\n`;
-    });
-    report += '\n';
-  }
-
-  if (redditPosts.length > 0) {
-    report += '🤖 Reddit Hot\n';
-    redditPosts.slice(0, prefs.maxRedditPosts || 10).forEach((p, i) => {
-      report += `${i + 1}. r/${p.subreddit} - ${p.title} (${p.score} upvotes)\n`;
-    });
-    report += '\n';
-  }
-
-  if (phProducts.length > 0) {
-    report += '🚀 Product Hunt\n';
-    phProducts.slice(0, prefs.maxPHProducts || 5).forEach((p, i) => {
-      report += `${i + 1}. ${p.name} - ${p.tagline}\n`;
-    });
-    report += '\n';
-  }
-
-  if (devtoArticles.length > 0) {
-    report += '📝 Dev.to Top\n';
-    devtoArticles.slice(0, prefs.maxDevToArticles || 5).forEach((a, i) => {
-      report += `${i + 1}. ${a.title} (${a.reactions} reactions)\n`;
-    });
-  }
-
-  return report;
 }
 
 module.exports = { generateDailyReport };

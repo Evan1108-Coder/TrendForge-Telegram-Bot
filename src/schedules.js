@@ -1,6 +1,7 @@
 const cron = require('node-cron');
 const fs = require('fs');
 const path = require('path');
+const { sendReportHTML } = require('./render');
 
 const SCHEDULES_FILE = path.join(__dirname, '..', 'schedules.json');
 const activeJobs = new Map();
@@ -110,7 +111,7 @@ async function executeScheduledAction(name, config) {
         reportGeneratorFn = require('./report').generateDailyReport;
       }
       const report = await reportGeneratorFn();
-      await sendLongDirect(chatId, report);
+      await sendReportHTML(botRef.api, chatId, report);
     } else if (config.type === 'message') {
       const msg = config.message || `Scheduled: ${config.description}`;
       await sendLongDirect(chatId, msg);

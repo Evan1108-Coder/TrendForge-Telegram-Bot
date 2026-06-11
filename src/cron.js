@@ -2,6 +2,7 @@ const cron = require('node-cron');
 const { generateDailyReport } = require('./report');
 const { loadPreferences } = require('./preferences');
 const { startAllSchedules, restartAllSchedules } = require('./schedules');
+const { sendReportHTML } = require('./render');
 
 let currentJob = null;
 let botRef = null;
@@ -19,23 +20,7 @@ async function sendReport(bot) {
   }
   try {
     const report = await generateDailyReport();
-    const maxLen = 4000;
-    if (report.length <= maxLen) {
-      await bot.api.sendMessage(chatId, report);
-    } else {
-      let remaining = report;
-      while (remaining.length > 0) {
-        if (remaining.length <= maxLen) {
-          await bot.api.sendMessage(chatId, remaining);
-          break;
-        }
-        let splitAt = remaining.lastIndexOf('\n\n', maxLen);
-        if (splitAt < maxLen * 0.3) splitAt = remaining.lastIndexOf('\n', maxLen);
-        if (splitAt < maxLen * 0.3) splitAt = maxLen;
-        await bot.api.sendMessage(chatId, remaining.substring(0, splitAt));
-        remaining = remaining.substring(splitAt).trimStart();
-      }
-    }
+    await sendReportHTML(bot.api, chatId, report);
     console.log('[CRON] Default report sent successfully.');
   } catch (err) {
     console.error('[CRON] Failed to send report:', err.message);

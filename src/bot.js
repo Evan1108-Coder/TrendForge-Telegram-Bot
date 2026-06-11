@@ -46,6 +46,7 @@ function createBot(token) {
       '- Fetch data from any URL\n' +
       '- Run system info commands\n' +
       '- Manage your preferences\n\n' +
+      'Commands: /ideas (creative project ideas from today\'s trends)\n\n' +
       'Just talk to me naturally! Examples:\n' +
       '- "What\'s trending on GitHub?"\n' +
       '- Send a file and ask "Summarize this"\n' +
@@ -54,6 +55,18 @@ function createBot(token) {
       '- "Remind me in 30 minutes to check the deploy"\n\n' +
       'I figure out what to do from your message -- no commands needed!'
     );
+  });
+
+  // On-demand project ideas. The daily report no longer carries a PROJECT IDEAS
+  // section (it's now a tight Top-3 + signal); users pull ideas when they want
+  // them. Reuses the normal text pipeline so it fetches live data and synthesizes.
+  bot.command('ideas', async (ctx) => {
+    console.log(`[Bot] /ideas from ${ctx.from?.first_name} (${ctx.from?.id})`);
+    const chatId = ctx.chat.id;
+    queueMessage(ctx, chatId, {
+      type: 'text',
+      text: 'Brainstorm 3 genuinely creative, buildable project ideas inspired by what is trending RIGHT NOW across GitHub, Hacker News, Reddit, Product Hunt and Dev.to. Fetch today\'s live data first, then for each idea give a one-line concept, a suggested tech stack, and who it is for. Be original and avoid generic CRUD apps.',
+    });
   });
 
   function buildMessageContext(ctx) {
@@ -119,7 +132,7 @@ function createBot(token) {
   }
 
   bot.on('message:text', (ctx) => {
-    if (ctx.message.text === '/start') return;
+    if (ctx.message.text === '/start' || ctx.message.text === '/ideas') return;
     const chatId = ctx.chat.id;
     const text = buildMessageContext(ctx);
     queueMessage(ctx, chatId, { type: 'text', text });
