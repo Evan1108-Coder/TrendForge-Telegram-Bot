@@ -119,8 +119,12 @@ async function executeScheduledAction(name, config) {
   } catch (e) {
     console.error(`[Schedules] Error in "${name}":`, e.message);
     try {
-      await botRef.api.sendMessage(chatId, `Schedule "${name}" failed: ${e.message}`);
-    } catch {}
+      const { handleError } = require('./errors');
+      const explanation = await handleError({ err: e, where: `the scheduled report "${name}"` });
+      await botRef.api.sendMessage(chatId, explanation);
+    } catch (e2) {
+      console.error(`[Schedules] Could not send failure notice for "${name}":`, e2.message);
+    }
   }
 }
 
@@ -146,6 +150,11 @@ async function sendLongDirect(chatId, text) {
 
 function startAllSchedules(bot) {
   botRef = bot;
+  const { loadPreferences } = require('./preferences');
+  if (loadPreferences().paused) {
+    console.log('[Schedules] Paused — skipping all custom schedules');
+    return;
+  }
   const schedules = loadSchedules();
   let count = 0;
   for (const [name, config] of Object.entries(schedules)) {

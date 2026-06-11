@@ -1,11 +1,16 @@
 const { Bot } = require('grammy');
 const { execSync } = require('child_process');
 const axios = require('axios');
-const { chat, chatWithVision, supportsVision, getAllModels, getAvailableModels } = require('./llm/providers');
+const { version: VERSION } = require('../package.json');
+const { chat, chatWithVision, supportsVision, getAllModels, getAvailableModels, getProviderStatus, getProviderForModel } = require('./llm/providers');
+const { handleError } = require('./errors');
 const { loadPreferences, updatePreferences } = require('./preferences');
-const { restartCron, scheduleLabel } = require('./cron');
+const { restartCron, stopCron, scheduleLabel } = require('./cron');
 const { addSchedule, removeSchedule, listSchedules, restartAllSchedules } = require('./schedules');
 const { saveNote, readNote, deleteNote, listNotes } = require('./notes');
+const { addMemory, listMemories, rawMemories, forgetMemory } = require('./memory');
+const { generateDailyReport } = require('./report');
+const { sendReportHTML, escapeHtml } = require('./render');
 const { fetchGitHubTrendingByPrefs } = require('./scrapers/github');
 const { fetchTopStories } = require('./scrapers/hackernews');
 const { fetchRedditHot } = require('./scrapers/reddit');
@@ -14,6 +19,69 @@ const { fetchDevToByInterests } = require('./scrapers/devto');
 const { withRetry } = require('./utils/retry');
 const { cleanOutput, sendLong } = require('./utils/format');
 const { classifyFile, downloadTelegramFile, extractText, getImageBase64, getMimeType, getSupportedExtensions } = require('./files');
+
+// pm2 process name used by /restart. Override with PM2_PROCESS_NAME for forks.
+const PM2_NAME = process.env.PM2_PROCESS_NAME || 'trendforge';
+
+// Registered with Telegram via setMyCommands so they appear in the "/" menu.
+const COMMAND_MENU = [
+  { command: 'help', description: 'Show all commands' },
+  { command: 'report', description: 'Generate a trend report now' },
+  { command: 'ideas', description: "Creative project ideas from today's trends" },
+  { command: 'status', description: 'Bot status, model & schedule' },
+  { command: 'version', description: 'Version & build info' },
+  { command: 'model', description: 'View or switch the AI model' },
+  { command: 'sources', description: 'View or toggle trend sources' },
+  { command: 'recall', description: 'Show everything I remember' },
+  { command: 'recallraw', description: 'Dump memory verbatim' },
+  { command: 'remember', description: 'Save something to memory' },
+  { command: 'forget', description: 'Delete from memory' },
+  { command: 'schedules', description: 'List active schedules' },
+  { command: 'pause', description: 'Pause automatic reports' },
+  { command: 'resume', description: 'Resume automatic reports' },
+  { command: 'config', description: 'API keys & provider status' },
+  { command: 'restart', description: 'Restart the bot' },
+];
+
+const HELP_TEXT =
+  `🔨 TrendForge v${VERSION} — commands\n\n` +
+  'REPORTS\n' +
+  '/report — full trend report right now\n' +
+  "/ideas — creative project ideas from today's trends\n" +
+  '/pause · /resume — mute / unmute automatic reports\n' +
+  '/schedules — list scheduled reports\n\n' +
+  'MEMORY (I remember things for you)\n' +
+  '/remember <text> — save a fact or preference\n' +
+  '/recall — show everything I remember\n' +
+  '/recallraw — exact verbatim dump\n' +
+  '/forget <id|text|all> — delete memories\n\n' +
+  'CONFIG\n' +
+  '/model [name] — view or switch the AI model\n' +
+  '/sources [name] — view or toggle trend sources\n' +
+  '/config — API keys & provider status\n\n' +
+  'SYSTEM\n' +
+  '/status — uptime, model, schedule\n' +
+  '/version — version & build\n' +
+  '/restart — restart the bot\n\n' +
+  'You can also just talk to me naturally for anything else.';
+
+function formatUptime(seconds) {
+  const s = Math.floor(seconds);
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const parts = [];
+  if (d) parts.push(`${d}d`);
+  if (h) parts.push(`${h}h`);
+  if (m || (!d && !h)) parts.push(`${m}m`);
+  return parts.join(' ');
+}
+
+const ALL_SOURCES = ['github', 'hn', 'reddit', 'ph', 'devto'];
+const SOURCE_ALIASES = {
+  producthunt: 'ph', 'product-hunt': 'ph', 'product_hunt': 'ph',
+  'dev.to': 'devto', dev: 'devto', hackernews: 'hn', 'hacker-news': 'hn',
+};
 
 function createBot(token) {
   const bot = new Bot(token);
@@ -36,24 +104,22 @@ function createBot(token) {
   bot.command('start', async (ctx) => {
     console.log(`[Bot] /start from ${ctx.from.first_name} (${ctx.from.id}), chat ${ctx.chat.id}`);
     await ctx.reply(
-      '🔨 Welcome to TrendForge v3.2!\n\n' +
+      `🔨 Welcome to TrendForge v${VERSION}!\n\n` +
       'I\'m your AI-powered tech assistant. I can:\n\n' +
       '- Fetch trends from GitHub, HN, Reddit, Product Hunt, Dev.to\n' +
       '- Analyze files you send me (text, PDF, DOCX, images, code)\n' +
       '- Set up complex schedules (multiple daily reports, bimonthly patterns, etc.)\n' +
-      '- Set reminders\n' +
-      '- Save and recall notes\n' +
-      '- Fetch data from any URL\n' +
-      '- Run system info commands\n' +
-      '- Manage your preferences\n\n' +
-      'Commands: /ideas (creative project ideas from today\'s trends)\n\n' +
-      'Just talk to me naturally! Examples:\n' +
-      '- "What\'s trending on GitHub?"\n' +
-      '- Send a file and ask "Summarize this"\n' +
-      '- Reply to my message to continue a thread\n' +
-      '- "Report me 2 times a day"\n' +
-      '- "Remind me in 30 minutes to check the deploy"\n\n' +
-      'I figure out what to do from your message -- no commands needed!'
+      '- Set reminders and remember things for you\n' +
+      '- Fetch data from any URL & run system info commands\n\n' +
+      'QUICK START\n' +
+      '/report — get a trend report now\n' +
+      '/ideas — creative project ideas from today\'s trends\n' +
+      '/model — view or switch the AI model\n' +
+      '/config — set up API keys (read from .env)\n' +
+      '/help — see all commands\n\n' +
+      'SELF-HOSTING? Add your API key(s) to the .env file (see .env.example), then /restart. ' +
+      'Run /config anytime to see which providers are active. For security, keys are never typed in chat.\n\n' +
+      'You can also just talk to me naturally — "What\'s trending on GitHub?", "Remind me in 30 minutes to check the deploy", etc.'
     );
   });
 
@@ -68,6 +134,209 @@ function createBot(token) {
       text: 'Brainstorm 3 genuinely creative, buildable project ideas inspired by what is trending RIGHT NOW across GitHub, Hacker News, Reddit, Product Hunt and Dev.to. Fetch today\'s live data first, then for each idea give a one-line concept, a suggested tech stack, and who it is for. Be original and avoid generic CRUD apps.',
     });
   });
+
+  // ---- v3.4 command set ----------------------------------------------------
+
+  bot.command('help', async (ctx) => {
+    await ctx.reply(HELP_TEXT);
+  });
+
+  bot.command('version', async (ctx) => {
+    const prefs = loadPreferences();
+    await ctx.reply(`🔨 TrendForge v${VERSION}\nNode ${process.version}\nModel: ${prefs.model}`);
+  });
+
+  bot.command('status', async (ctx) => {
+    const prefs = loadPreferences();
+    const available = getAvailableModels();
+    const all = getAllModels();
+    const activeModel = available.includes(prefs.model) ? prefs.model : (available[0] || 'none');
+    const custom = listSchedules().filter((s) => s.source === 'custom');
+    const enabled = Array.isArray(prefs.enabledSources) && prefs.enabledSources.length ? prefs.enabledSources : ALL_SOURCES;
+    const state = prefs.paused ? '⏸️ PAUSED' : '▶️ active';
+    const modelNote = activeModel !== prefs.model ? ` (pref "${prefs.model}" has no key)` : '';
+    await ctx.reply(
+      [
+        `📊 TrendForge v${VERSION} — ${state}`,
+        `Uptime: ${formatUptime(process.uptime())}`,
+        `Model: ${activeModel}${modelNote}`,
+        `Models with key: ${available.length}/${all.length}`,
+        `Default report: ${scheduleLabel(prefs)}`,
+        `Custom schedules: ${custom.length}`,
+        `Sources: ${enabled.join(', ')}`,
+        `Timezone: ${prefs.timezone}`,
+      ].join('\n')
+    );
+  });
+
+  bot.command('restart', async (ctx) => {
+    console.log(`[Bot] /restart requested by ${ctx.from?.id}`);
+    await ctx.reply("♻️ Restarting TrendForge… back in a few seconds.");
+    // Give Telegram a moment to flush the reply; pm2 will kill+respawn this process.
+    setTimeout(() => {
+      try {
+        execSync(`pm2 restart ${PM2_NAME}`, { timeout: 15000 });
+      } catch (e) {
+        console.error('[Bot] /restart failed:', e.message);
+      }
+    }, 800);
+  });
+
+  bot.command('report', async (ctx) => {
+    console.log(`[Bot] /report requested by ${ctx.from?.id}`);
+    await ctx.reply('📡 Generating your trend report now…');
+    try {
+      const report = await generateDailyReport();
+      await sendReportHTML(bot.api, ctx.chat.id, report);
+    } catch (e) {
+      console.error('[Bot] /report failed:', e.message);
+      const explanation = await handleError({ err: e, where: 'generating your trend report' });
+      await sendLong(ctx, explanation);
+    }
+  });
+
+  bot.command('model', async (ctx) => {
+    const arg = (ctx.match || '').trim();
+    const prefs = loadPreferences();
+    const available = getAvailableModels();
+    const all = getAllModels();
+    if (!arg) {
+      const list = all.map((m) => `${m === prefs.model ? '➡️' : '  '} ${m}${available.includes(m) ? '' : ' (no key)'}`).join('\n');
+      await ctx.reply(`🤖 Current model: ${prefs.model}\nModels with a key: ${available.length}\n\n${list}\n\nSwitch with: /model <name>`);
+      return;
+    }
+    if (!all.includes(arg)) {
+      await ctx.reply(`Unknown model "${arg}". Run /model to see the list.`);
+      return;
+    }
+    if (!available.includes(arg)) {
+      // Evan's canonical case: don't hand back a canned line — let the AI explain
+      // the exact situation (which key is missing, what's ready to use instead).
+      const provider = getProviderForModel(arg);
+      const explanation = await handleError({
+        err: new Error(`No API key set for model "${arg}".`),
+        where: 'switching the AI model',
+        extra: {
+          attemptedModel: arg,
+          neededKey: provider ? provider.envKey : 'the matching provider key',
+          attemptedProvider: provider ? provider.name : 'unknown',
+        },
+      });
+      await sendLong(ctx, explanation);
+      return;
+    }
+    updatePreferences({ model: arg });
+    await ctx.reply(`✅ Model switched to ${arg}.`);
+  });
+
+  bot.command('sources', async (ctx) => {
+    const prefs = loadPreferences();
+    let enabled = Array.isArray(prefs.enabledSources) && prefs.enabledSources.length ? [...prefs.enabledSources] : [...ALL_SOURCES];
+    const arg = (ctx.match || '').trim().toLowerCase();
+    if (!arg) {
+      const list = ALL_SOURCES.map((s) => `${enabled.includes(s) ? '✅' : '❌'} ${s}`).join('\n');
+      await ctx.reply(`📡 Trend sources:\n${list}\n\nToggle with: /sources <name>\n(github, hn, reddit, ph, devto)`);
+      return;
+    }
+    const key = SOURCE_ALIASES[arg] || arg;
+    if (!ALL_SOURCES.includes(key)) {
+      await ctx.reply(`Unknown source "${arg}". Valid: ${ALL_SOURCES.join(', ')}`);
+      return;
+    }
+    const turningOff = enabled.includes(key);
+    if (turningOff) enabled = enabled.filter((s) => s !== key);
+    else enabled.push(key);
+    if (!enabled.length) {
+      await ctx.reply('At least one source must stay enabled.');
+      return;
+    }
+    updatePreferences({ enabledSources: enabled });
+    await ctx.reply(`✅ ${key} ${turningOff ? 'disabled' : 'enabled'}.\nActive: ${enabled.join(', ')}`);
+  });
+
+  bot.command('remember', async (ctx) => {
+    const text = (ctx.match || '').trim();
+    if (!text) {
+      await ctx.reply('Tell me what to remember:\n/remember <text>');
+      return;
+    }
+    const r = addMemory(text);
+    await ctx.reply(`🧠 Got it — remembered as #${r.id}.`);
+  });
+
+  bot.command('recall', async (ctx) => {
+    const entries = listMemories();
+    if (!entries.length) {
+      await ctx.reply('🧠 I have no saved memories yet. Add one with /remember <text>.');
+      return;
+    }
+    const body = entries.map((e) => `#${e.id} · ${e.text}`).join('\n');
+    await sendLong(ctx, `🧠 What I remember (${entries.length}):\n${body}`);
+  });
+
+  bot.command('recallraw', async (ctx) => {
+    const raw = rawMemories();
+    const payload = `<pre>${escapeHtml(raw)}</pre>`;
+    if (payload.length <= 4096) {
+      await ctx.reply(payload, { parse_mode: 'HTML' });
+    } else {
+      await sendLong(ctx, raw); // too big for one HTML block; send verbatim plain text
+    }
+  });
+
+  bot.command('forget', async (ctx) => {
+    const arg = (ctx.match || '').trim();
+    if (!arg) {
+      await ctx.reply('What should I forget?\n/forget <id> · /forget <text> · /forget all');
+      return;
+    }
+    const r = forgetMemory(arg);
+    if (r.mode === 'all') {
+      await ctx.reply(`🧹 Cleared ${r.removed} memor${r.removed === 1 ? 'y' : 'ies'}.`);
+    } else if (r.removed === 0) {
+      await ctx.reply(`Nothing matched "${arg}". Run /recall to see ids.`);
+    } else {
+      await ctx.reply(`🧹 Forgot ${r.removed} memor${r.removed === 1 ? 'y' : 'ies'}.`);
+    }
+  });
+
+  bot.command('schedules', async (ctx) => {
+    const all = listSchedules();
+    const lines = all.map((s) => `${s.enabled ? '🟢' : '⚪'} ${s.name} — ${s.description} [${s.cron}]${s.source === 'custom' ? ' (custom)' : ''}`);
+    const prefs = loadPreferences();
+    const header = prefs.paused ? '🗓 Schedules (⏸️ all paused — /resume to re-enable):' : '🗓 Schedules:';
+    await ctx.reply(`${header}\n${lines.join('\n')}`);
+  });
+
+  bot.command('pause', async (ctx) => {
+    updatePreferences({ paused: true });
+    stopCron();
+    await ctx.reply('⏸️ Automatic reports paused. Your schedules are kept — resume anytime with /resume.');
+  });
+
+  bot.command('resume', async (ctx) => {
+    updatePreferences({ paused: false });
+    restartCron();
+    await ctx.reply('▶️ Automatic reports resumed.');
+  });
+
+  bot.command('config', async (ctx) => {
+    const prefs = loadPreferences();
+    const status = getProviderStatus();
+    const lines = status.map((p) => `${p.configured ? '✅' : '❌'} <b>${p.name}</b> — <code>${p.envKey}</code>`);
+    const haveAny = status.some((p) => p.configured);
+    const text =
+      '⚙️ <b>Configuration</b>\n\n' +
+      `Active model: <code>${escapeHtml(prefs.model)}</code>\n\n` +
+      `<b>API providers</b> (✅ = key detected):\n${lines.join('\n')}\n\n` +
+      'Keys are read from your <code>.env</code> file at startup — for security they are never typed in chat.\n' +
+      'To enable a provider: add its key to <code>.env</code> (see <code>.env.example</code>), then run /restart.\n\n' +
+      'Switch model: /model &lt;name&gt;   ·   Toggle sources: /sources' +
+      (haveAny ? '' : '\n\n⚠️ No API keys detected — the bot cannot call any model yet.');
+    await ctx.reply(text, { parse_mode: 'HTML', disable_web_page_preview: true });
+  });
+
+  // --------------------------------------------------------------------------
 
   function buildMessageContext(ctx) {
     const msg = ctx.message;
@@ -189,7 +458,11 @@ function createBot(token) {
     const available = getAvailableModels();
     const allModels = getAllModels();
     const model = available.includes(prefs.model) ? prefs.model : available[0];
-    if (!model) { await ctx.reply('No AI model available.'); return; }
+    if (!model) {
+      const explanation = await handleError({ err: new Error('No AI model available — no provider key is set.'), where: 'analyzing your file' });
+      await sendLong(ctx, explanation);
+      return;
+    }
 
     try {
       const { buffer, fileName: dlName } = await downloadTelegramFile(bot, payload.fileId);
@@ -261,7 +534,8 @@ function createBot(token) {
       }
     } catch (err) {
       console.error('[Bot] File processing error:', err.message);
-      await ctx.reply(`Error processing file: ${err.message}`);
+      const explanation = await handleError({ err, where: 'analyzing your file', extra: { fileType: payload.fileType } });
+      await sendLong(ctx, explanation);
     }
   }
 
@@ -274,7 +548,8 @@ function createBot(token) {
     const model = available.includes(prefs.model) ? prefs.model : available[0];
 
     if (!model) {
-      await ctx.reply('No AI model available right now. Please check API key configuration.');
+      const explanation = await handleError({ err: new Error('No AI model available — no provider key is set.'), where: 'processing your message' });
+      await sendLong(ctx, explanation);
       return;
     }
 
@@ -324,7 +599,8 @@ function createBot(token) {
       }
     } catch (err) {
       console.error('[Bot] Error:', err.message);
-      await ctx.reply('Something went wrong processing your request. Please try again or rephrase your question.');
+      const explanation = await handleError({ err, where: 'processing your message' });
+      await sendLong(ctx, explanation);
     }
   }
 
@@ -843,4 +1119,4 @@ RESPONSE FORMAT (CRITICAL):
   return bot;
 }
 
-module.exports = { createBot };
+module.exports = { createBot, COMMAND_MENU };

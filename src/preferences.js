@@ -14,6 +14,8 @@ const DEFAULT_PREFS = {
   reportCron: '0 6 * * *',
   reportScheduleText: 'Daily at 06:00',
   model: 'minimax-m2.5-lightning',
+  paused: false,
+  enabledSources: ['github', 'hn', 'reddit', 'ph', 'devto'],
   maxGitHubRepos: 10,
   maxHNStories: 10,
   maxRedditPosts: 10,

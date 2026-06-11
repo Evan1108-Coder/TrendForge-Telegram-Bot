@@ -5,6 +5,7 @@ const { fetchProductHunt } = require('./scrapers/producthunt');
 const { fetchDevToByInterests } = require('./scrapers/devto');
 const { chat, getAvailableModels } = require('./llm/providers');
 const { loadPreferences } = require('./preferences');
+const { memoriesForPrompt } = require('./memory');
 const { withRetry } = require('./utils/retry');
 const {
   buildCandidates,
@@ -29,14 +30,17 @@ function dateLabel(timezone) {
 
 // Ask the model for a SMALL structured payload. It only writes prose; every
 // fact (titles, links, metrics) is resolved from our data by id afterwards.
-function buildPrompt(prefs, candidateList) {
+function buildPrompt(prefs, candidateList, memText) {
+  const memBlock = memText
+    ? `\nWHAT THE READER ASKED YOU TO REMEMBER (use to personalize ranking & framing; don't quote verbatim)\n${memText}\n`
+    : '';
   return `You are TrendForge, a sharp daily tech-trend curator writing a SHORT briefing for one reader.
 
 READER PROFILE
 - Interests: ${prefs.interests.join(', ')}
 - Preferred languages: ${prefs.languages.join(', ')}
 - Avoid topics: ${prefs.avoidTopics.length ? prefs.avoidTopics.join(', ') : 'none'}
-
+${memBlock}
 TODAY'S CANDIDATES (one per line: "id | source | title | metric | description")
 ${candidateList}
 
@@ -70,27 +74,33 @@ async function generateDailyReport() {
     devto: prefs.maxDevToArticles || 5,
   };
 
+  const allSources = ['github', 'hn', 'reddit', 'ph', 'devto'];
+  const enabled = Array.isArray(prefs.enabledSources) && prefs.enabledSources.length
+    ? prefs.enabledSources
+    : allSources;
+  const want = (s) => enabled.includes(s);
+
   const [githubRepos, hnStories, redditPosts, phProducts, devtoArticles] = await Promise.all([
-    withRetry(() => fetchGitHubTrendingByPrefs(prefs.languages, prefs.maxGitHubRepos), { label: 'GitHub' }).catch((err) => {
+    want('github') ? withRetry(() => fetchGitHubTrendingByPrefs(prefs.languages, prefs.maxGitHubRepos), { label: 'GitHub' }).catch((err) => {
       console.error('[Report] GitHub scrape failed:', err.message);
       return [];
-    }),
-    withRetry(() => fetchTopStories(prefs.maxHNStories), { label: 'HackerNews' }).catch((err) => {
+    }) : Promise.resolve([]),
+    want('hn') ? withRetry(() => fetchTopStories(prefs.maxHNStories), { label: 'HackerNews' }).catch((err) => {
       console.error('[Report] HN fetch failed:', err.message);
       return [];
-    }),
-    withRetry(() => fetchRedditHot(), { label: 'Reddit' }).catch((err) => {
+    }) : Promise.resolve([]),
+    want('reddit') ? withRetry(() => fetchRedditHot(), { label: 'Reddit' }).catch((err) => {
       console.error('[Report] Reddit fetch failed:', err.message);
       return [];
-    }),
-    withRetry(() => fetchProductHunt(), { label: 'ProductHunt' }).catch((err) => {
+    }) : Promise.resolve([]),
+    want('ph') ? withRetry(() => fetchProductHunt(), { label: 'ProductHunt' }).catch((err) => {
       console.error('[Report] Product Hunt fetch failed:', err.message);
       return [];
-    }),
-    withRetry(() => fetchDevToByInterests(prefs.interests), { label: 'DevTo' }).catch((err) => {
+    }) : Promise.resolve([]),
+    want('devto') ? withRetry(() => fetchDevToByInterests(prefs.interests), { label: 'DevTo' }).catch((err) => {
       console.error('[Report] Dev.to fetch failed:', err.message);
       return [];
-    }),
+    }) : Promise.resolve([]),
   ]);
 
   const data = { github: githubRepos, hn: hnStories, reddit: redditPosts, ph: phProducts, devto: devtoArticles };
@@ -127,7 +137,7 @@ async function generateDailyReport() {
         role: 'system',
         content: 'You are TrendForge, a concise tech-trend curator. You ALWAYS reply with a single valid JSON object and nothing else.',
       },
-      { role: 'user', content: buildPrompt(prefs, list) },
+      { role: 'user', content: buildPrompt(prefs, list, memoriesForPrompt()) },
     ]);
 
     const parsed = parseModelJson(response);

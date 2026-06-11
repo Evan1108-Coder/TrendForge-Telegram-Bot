@@ -1,8 +1,9 @@
 const cron = require('node-cron');
 const { generateDailyReport } = require('./report');
 const { loadPreferences } = require('./preferences');
-const { startAllSchedules, restartAllSchedules } = require('./schedules');
+const { startAllSchedules, restartAllSchedules, stopAllSchedules } = require('./schedules');
 const { sendReportHTML } = require('./render');
+const { handleError } = require('./errors');
 
 let currentJob = null;
 let botRef = null;
@@ -25,8 +26,11 @@ async function sendReport(bot) {
   } catch (err) {
     console.error('[CRON] Failed to send report:', err.message);
     try {
-      await bot.api.sendMessage(chatId, 'TrendForge report failed this cycle. Check logs for details.');
-    } catch {}
+      const explanation = await handleError({ err, where: 'the scheduled daily report' });
+      await bot.api.sendMessage(chatId, explanation);
+    } catch (e2) {
+      console.error('[CRON] Could not send failure notice:', e2.message);
+    }
   }
 }
 
@@ -35,6 +39,11 @@ function startCron(bot) {
   const prefs = loadPreferences();
 
   startAllSchedules(bot);
+
+  if (prefs.paused) {
+    console.log('[CRON] Paused — no automatic reports until /resume');
+    return null;
+  }
 
   if (prefs.reportEnabled === false) {
     console.log('[CRON] Default report disabled by preference');
@@ -65,6 +74,14 @@ function startCron(bot) {
   return currentJob;
 }
 
+function stopCron() {
+  if (currentJob) {
+    currentJob.stop();
+    currentJob = null;
+  }
+  stopAllSchedules();
+}
+
 function restartCron() {
   if (currentJob) {
     currentJob.stop();
@@ -77,4 +94,4 @@ function restartCron() {
   return null;
 }
 
-module.exports = { startCron, restartCron, scheduleLabel };
+module.exports = { startCron, restartCron, stopCron, scheduleLabel };

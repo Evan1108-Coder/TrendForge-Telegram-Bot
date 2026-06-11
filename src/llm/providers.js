@@ -220,4 +220,15 @@ function getAvailableModels() {
   });
 }
 
-module.exports = { chat, chatWithVision, supportsVision, getAllModels, getAvailableModels, getProviderForModel };
+// Per-provider key presence for /config. Reports ONLY whether a key is set
+// (boolean) and the env var name — never the secret value itself.
+function getProviderStatus() {
+  return Object.entries(PROVIDERS).map(([name, p]) => ({
+    name,
+    envKey: p.envKey,
+    configured: !!process.env[p.envKey],
+    models: p.models,
+  }));
+}
+
+module.exports = { chat, chatWithVision, supportsVision, getAllModels, getAvailableModels, getProviderForModel, getProviderStatus };

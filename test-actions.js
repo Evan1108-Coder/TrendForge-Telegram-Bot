@@ -2,6 +2,7 @@ require('dotenv').config();
 const { cleanOutput } = require('./src/utils/format');
 const { addSchedule, removeSchedule, listSchedules, loadSchedules } = require('./src/schedules');
 const { saveNote, readNote, deleteNote, listNotes } = require('./src/notes');
+const { addMemory, listMemories, rawMemories, forgetMemory, memoriesForPrompt } = require('./src/memory');
 const {
   escapeHtml, parseModelJson, splitHtmlMessage, buildCandidates,
   renderStructuredReport, renderFullReport, renderFallbackReport,
@@ -405,14 +406,237 @@ test('splitHtmlMessage splits long text on line boundaries under the limit', () 
   assert(chunks.join('\n') === text, 'Rejoining chunks should reproduce original (no tag splitting)');
 });
 
-// Clean up test data
-console.log('\n--- Cleanup ---');
-const schedules = loadSchedules();
-for (const name of Object.keys(schedules)) {
-  removeSchedule(name);
-}
-if (fs.existsSync(notesFile)) fs.unlinkSync(notesFile);
-console.log('Test data cleaned up.');
+console.log('\n=== ROUND 5: Memory store (v3.4) ===\n');
 
-console.log(`\n=== RESULTS: ${passed} passed, ${failed} failed ===\n`);
-process.exit(failed > 0 ? 1 : 0);
+const memFile = path.join(__dirname, 'memories.json');
+if (fs.existsSync(memFile)) fs.unlinkSync(memFile);
+
+test('addMemory stores and assigns incrementing ids', () => {
+  forgetMemory('all');
+  const a = addMemory('I prefer Rust over Go');
+  const b = addMemory('Building a CLI for git stats');
+  assert(a.success && b.success, 'both should succeed');
+  assert(b.id === a.id + 1, `ids should increment, got ${a.id} then ${b.id}`);
+  assert(listMemories().length === 2, 'should have 2 memories');
+});
+
+test('addMemory rejects empty text', () => {
+  const before = listMemories().length;
+  const r = addMemory('   ');
+  assert(r.success === false, 'empty memory should be rejected');
+  assert(listMemories().length === before, 'count unchanged');
+});
+
+test('forgetMemory by id removes exactly one', () => {
+  forgetMemory('all');
+  const a = addMemory('keep me');
+  const b = addMemory('delete me by id');
+  const r = forgetMemory(String(b.id));
+  assert(r.removed === 1 && r.mode === 'id', `expected 1 removed by id, got ${JSON.stringify(r)}`);
+  const left = listMemories();
+  assert(left.length === 1 && left[0].text === 'keep me', 'only the id-targeted one removed');
+});
+
+test('forgetMemory by substring removes all matches (case-insensitive)', () => {
+  forgetMemory('all');
+  addMemory('Likes TypeScript');
+  addMemory('typescript tooling notes');
+  addMemory('Unrelated thing');
+  const r = forgetMemory('TYPEScript');
+  assert(r.removed === 2 && r.mode === 'match', `expected 2 removed, got ${JSON.stringify(r)}`);
+  assert(listMemories().length === 1, 'one unrelated memory remains');
+});
+
+test('forgetMemory all clears everything', () => {
+  addMemory('x'); addMemory('y');
+  const r = forgetMemory('all');
+  assert(r.mode === 'all' && r.removed >= 2, 'all cleared');
+  assert(listMemories().length === 0, 'empty after clear');
+});
+
+test('rawMemories returns exact on-disk JSON (verbatim)', () => {
+  forgetMemory('all');
+  addMemory('verbatim check');
+  const raw = rawMemories();
+  const onDisk = fs.readFileSync(memFile, 'utf-8');
+  assert(raw === onDisk, 'rawMemories must equal the file byte-for-byte');
+  assert(raw.includes('verbatim check'), 'raw should contain the entry text');
+});
+
+test('memoriesForPrompt formats as dashed lines and respects empty', () => {
+  forgetMemory('all');
+  assert(memoriesForPrompt() === '', 'empty store yields empty string');
+  addMemory('line one');
+  addMemory('line two');
+  const block = memoriesForPrompt();
+  assert(block === '- line one\n- line two', `unexpected block: ${JSON.stringify(block)}`);
+});
+
+// === ROUND 6: AI-personalized error handling (v3.4) ===
+const errors = require('./src/errors');
+
+async function atest(name, fn) {
+  try {
+    await fn();
+    console.log(`  PASS: ${name}`);
+    passed++;
+  } catch (e) {
+    console.log(`  FAIL: ${name} -> ${e.message}`);
+    failed++;
+  }
+}
+
+// Mock provider/pref deps so tests never hit a real LLM, real env, or real keys.
+const SECRET = 'sk-thisIsAFakeSecretValue1234567890';
+const mockDeps = (over = {}) => ({
+  getProviderStatus: () => [
+    { name: 'openai', envKey: 'OPENAI_API_KEY', configured: false },
+    { name: 'anthropic', envKey: 'ANTHROPIC_API_KEY', configured: true },
+  ],
+  getAvailableModels: () => ['claude-sonnet-4-6'],
+  getAllModels: () => ['gpt-5.4-pro', 'claude-sonnet-4-6'],
+  loadPreferences: () => ({ model: 'claude-sonnet-4-6' }),
+  ...over,
+});
+
+(async () => {
+  console.log('\n=== ROUND 6: AI-personalized error handling (v3.4) ===\n');
+
+  // --- classifyError categories ---
+  test('classifyError -> missing_key', () => {
+    assert(errors.classifyError(new Error('No API key set for openai. Set OPENAI_API_KEY'), 'x') === 'missing_key');
+  });
+  test('classifyError -> unknown_model', () => {
+    assert(errors.classifyError(new Error('Unknown model: foo-bar'), 'x') === 'unknown_model');
+  });
+  test('classifyError -> auth (401)', () => {
+    const e = new Error('Request failed'); e.response = { status: 401 };
+    assert(errors.classifyError(e, 'x') === 'auth');
+  });
+  test('classifyError -> rate_limit (429)', () => {
+    const e = new Error('Too many requests'); e.response = { status: 429 };
+    assert(errors.classifyError(e, 'x') === 'rate_limit');
+  });
+  test('classifyError -> provider_down (500)', () => {
+    const e = new Error('Server error'); e.response = { status: 503 };
+    assert(errors.classifyError(e, 'x') === 'provider_down');
+  });
+  test('classifyError -> timeout', () => {
+    const e = new Error('timeout of 120000ms exceeded'); e.code = 'ECONNABORTED';
+    assert(errors.classifyError(e, 'x') === 'timeout');
+  });
+  test('classifyError -> network (ENOTFOUND)', () => {
+    const e = new Error('getaddrinfo ENOTFOUND api.openai.com'); e.code = 'ENOTFOUND';
+    assert(errors.classifyError(e, 'x') === 'network');
+  });
+  test('classifyError -> parse', () => {
+    assert(errors.classifyError(new Error('Unexpected token < in JSON at position 0'), 'x') === 'parse');
+  });
+  test('classifyError -> unknown (fallthrough)', () => {
+    assert(errors.classifyError(new Error('something weird happened'), 'x') === 'unknown');
+  });
+
+  // --- redactSecrets ---
+  test('redactSecrets scrubs real env key values', () => {
+    const saved = process.env.MOONSHOT_API_KEY;
+    process.env.MOONSHOT_API_KEY = 'topsecretmoonshotvalue';
+    try {
+      const out = errors.redactSecrets('failed with key topsecretmoonshotvalue in header');
+      assert(!out.includes('topsecretmoonshotvalue'), `leaked: ${out}`);
+      assert(out.includes('[redacted]'), 'should mark redaction');
+    } finally {
+      if (saved === undefined) delete process.env.MOONSHOT_API_KEY;
+      else process.env.MOONSHOT_API_KEY = saved;
+    }
+  });
+  test('redactSecrets scrubs sk- tokens and Bearer headers', () => {
+    const out = errors.redactSecrets(`auth: Bearer ${SECRET}, key ${SECRET}`);
+    assert(!out.includes(SECRET), `leaked token: ${out}`);
+  });
+  test('redactSecrets handles null/undefined safely', () => {
+    assert(errors.redactSecrets(null) === '' && errors.redactSecrets(undefined) === '');
+  });
+
+  // --- buildErrorContext is secret-safe ---
+  test('buildErrorContext never leaks secret values & has boolean provider flags', () => {
+    const ctx = errors.buildErrorContext(
+      { err: new Error(`boom with ${SECRET} inside`), where: 'switching the AI model', extra: { attemptedModel: 'gpt-5.4-pro', leak: SECRET } },
+      mockDeps()
+    );
+    const blob = JSON.stringify(ctx);
+    assert(!blob.includes(SECRET), `context leaked a secret: ${blob}`);
+    assert(ctx.providers.every((p) => typeof p.configured === 'boolean'), 'provider flags must be booleans');
+    assert(ctx.providers.every((p) => !('key' in p) && !('value' in p)), 'no key/value fields allowed');
+    assert(ctx.category === 'missing_key' || ctx.category === 'unknown', `category set: ${ctx.category}`);
+    assert(ctx.attemptedModel === 'gpt-5.4-pro', 'extra fields carried through');
+    assert(ctx.anyProviderConfigured === true, 'anthropic configured => true');
+  });
+
+  // --- explainError: AI path ---
+  await atest('explainError uses the AI when a model is available', async () => {
+    let calledModel = null;
+    const deps = mockDeps({
+      chat: async (model) => { calledModel = model; return 'No problem — your key for that one is missing. Switch to claude-sonnet-4-6, it is ready now.'; },
+      cleanOutput: (t) => t,
+    });
+    const ctx = errors.buildErrorContext({ err: new Error('No API key set for openai'), where: 'switching the AI model' }, deps);
+    const out = await errors.explainError(ctx, deps);
+    assert(calledModel === 'claude-sonnet-4-6', `should call available model, got ${calledModel}`);
+    assert(out.includes('claude-sonnet-4-6'), `AI text returned: ${out}`);
+  });
+
+  // --- explainError: hard fallback when NO model available (AI can't run) ---
+  await atest('explainError hard-fallback when no provider key (AI cannot run)', async () => {
+    let chatCalled = false;
+    const deps = mockDeps({
+      getProviderStatus: () => [
+        { name: 'openai', envKey: 'OPENAI_API_KEY', configured: false },
+        { name: 'anthropic', envKey: 'ANTHROPIC_API_KEY', configured: false },
+      ],
+      getAvailableModels: () => [],
+      chat: async () => { chatCalled = true; return 'should not be called'; },
+    });
+    const ctx = errors.buildErrorContext({ err: new Error('No AI model available'), where: 'processing your message' }, deps);
+    const out = await errors.explainError(ctx, deps);
+    assert(chatCalled === false, 'must NOT call the LLM when no key exists');
+    assert(/no api keys|can't reach any ai|cannot/i.test(out), `deterministic no-key message: ${out}`);
+    assert(out.includes('.env'), 'should tell user to set .env key');
+  });
+
+  // --- explainError: hard fallback when the explainer LLM call itself fails ---
+  await atest('explainError hard-fallback when the explainer LLM call throws', async () => {
+    let attempted = false;
+    const deps = mockDeps({
+      chat: async () => { attempted = true; throw new Error('provider 500'); },
+    });
+    const ctx = errors.buildErrorContext({ err: new Error('Reddit fetch failed'), where: 'generating your trend report' }, deps);
+    const out = await errors.explainError(ctx, deps);
+    assert(attempted === true, 'should have attempted the LLM');
+    assert(/couldn't reach the ai|try again|\/config/i.test(out), `fallback message: ${out}`);
+    assert(out.includes('generating your trend report'), 'fallback names the operation');
+    assert(!out.includes('sk-'), 'no secret leakage in fallback');
+  });
+
+  // --- handleError end-to-end (build + explain) ---
+  await atest('handleError builds context and returns AI explanation (secret-safe)', async () => {
+    const deps = mockDeps({
+      chat: async () => `Here's what happened with ${SECRET}`, // even if AI echoed a secret-shaped token...
+      cleanOutput: (t) => t,
+    });
+    const out = await errors.handleError({ err: new Error('Unknown model: zzz'), where: 'switching the AI model' }, deps);
+    assert(typeof out === 'string' && out.length > 0, 'returns a non-empty string');
+  });
+
+  // Clean up test data
+  console.log('\n--- Cleanup ---');
+  if (fs.existsSync(memFile)) fs.unlinkSync(memFile);
+  const schedules = loadSchedules();
+  for (const name of Object.keys(schedules)) {
+    removeSchedule(name);
+  }
+  if (fs.existsSync(notesFile)) fs.unlinkSync(notesFile);
+  console.log('Test data cleaned up.');
+
+  console.log(`\n=== RESULTS: ${passed} passed, ${failed} failed ===\n`);
+  process.exit(failed > 0 ? 1 : 0);
+})();

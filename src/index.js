@@ -1,6 +1,7 @@
 require('dotenv').config();
-const { createBot } = require('./bot');
+const { createBot, COMMAND_MENU } = require('./bot');
 const { startCron } = require('./cron');
+const { version: VERSION } = require('../package.json');
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!TOKEN) {
@@ -9,7 +10,7 @@ if (!TOKEN) {
 }
 
 async function main() {
-  console.log('🔨 TrendForge v3.2 starting...');
+  console.log(`🔨 TrendForge v${VERSION} starting...`);
   const bot = createBot(TOKEN);
 
   bot.catch((err) => {
@@ -19,12 +20,18 @@ async function main() {
   startCron(bot);
 
   await bot.start({
-    onStart: (info) => {
+    onStart: async (info) => {
       const prefs = require('./preferences').loadPreferences();
       const { getAvailableModels } = require('./llm/providers');
       const { scheduleLabel } = require('./cron');
       const available = getAvailableModels();
-      console.log(`🔨 TrendForge v3.2 running as @${info.username}`);
+      try {
+        await bot.api.setMyCommands(COMMAND_MENU);
+        console.log(`   Slash menu registered (${COMMAND_MENU.length} commands)`);
+      } catch (e) {
+        console.error('   setMyCommands failed:', e.message);
+      }
+      console.log(`🔨 TrendForge v${VERSION} running as @${info.username}`);
       console.log(`   Model: ${prefs.model}`);
       console.log(`   Available models: ${available.length}`);
       console.log(`   Sources: GitHub, HN, Reddit, Product Hunt, Dev.to`);
