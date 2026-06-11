@@ -40,6 +40,27 @@ TrendForge is for builders who want project ideas from real developer signals in
 - LLM-generated ideas still need human judgment before building.
 - Telegram and AI provider tokens are required for a full setup.
 
+## Quick Start
+
+```bash
+git clone https://github.com/Evan1108-Coder/TrendForge-Telegram-Bot.git
+cd TrendForge-Telegram-Bot
+npm install
+cp .env.example .env
+# Edit .env with your Telegram token and AI provider keys
+npm start
+```
+
+See [SETUP.md](SETUP.md) for detailed installation instructions.
+
+## Privacy and Data Handling
+
+- Telegram tokens and AI provider keys belong in `.env` and should never be committed.
+- User preferences, interests, and language settings may be stored locally by the bot.
+- Messages, files, links, and generated project ideas can be sent to the configured AI provider for analysis.
+- Trend data is collected from public sources such as GitHub, Hacker News, Reddit, Product Hunt, and Dev.to.
+- Do not send private files or sensitive messages unless you understand your bot deployment and selected AI provider.
+- See [SECURITY.md](SECURITY.md) for vulnerability reporting and secret-handling guidance.
 
 AI-powered Telegram bot that monitors **5 data sources** daily — GitHub Trending, Hacker News, Reddit, Product Hunt, and Dev.to — uses LLM to filter and generate personalized project ideas, and sends you a daily briefing.
 
@@ -89,19 +110,6 @@ AI-powered Telegram bot that monitors **5 data sources** daily — GitHub Trendi
 | `/help` | Show all commands |
 
 Or just send a message to chat naturally!
-
-## Quick Start
-
-```bash
-git clone https://github.com/Evan1108-Coder/TrendForge-Telegram-Bot.git
-cd TrendForge-Telegram-Bot
-npm install
-cp .env.example .env
-# Edit .env with your tokens
-npm start
-```
-
-See [SETUP.md](SETUP.md) for detailed installation instructions.
 
 ## Architecture
 
