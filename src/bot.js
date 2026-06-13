@@ -5,6 +5,8 @@ const { version: VERSION } = require('../package.json');
 const { chat, chatWithVision, supportsVision, getAllModels, getAvailableModels, getProviderStatus, getProviderForModel } = require('./llm/providers');
 const { handleError } = require('./errors');
 const { checkForUpdate, applyUpdate, formatUpdateNotice } = require('./update');
+const { createTaskQueue } = require('./taskqueue');
+const { humanizeCron, describeSchedule } = require('./humanize');
 const { loadPreferences, updatePreferences } = require('./preferences');
 const { restartCron, stopCron, scheduleLabel } = require('./cron');
 const { addSchedule, removeSchedule, listSchedules, restartAllSchedules } = require('./schedules');
@@ -23,6 +25,10 @@ const { classifyFile, downloadTelegramFile, extractText, getImageBase64, getMime
 
 // pm2 process name used by /restart. Override with PM2_PROCESS_NAME for forks.
 const PM2_NAME = process.env.PM2_PROCESS_NAME || 'trendforge';
+
+// Prompt behind /ideas — reused via the normal text pipeline so it fetches live
+// data and synthesizes. Kept as a constant so the command and queue share it.
+const IDEAS_PROMPT = 'Brainstorm 3 genuinely creative, buildable project ideas inspired by what is trending RIGHT NOW across GitHub, Hacker News, Reddit, Product Hunt and Dev.to. Fetch today\'s live data first, then for each idea give a one-line concept, a suggested tech stack, and who it is for. Be original and avoid generic CRUD apps.';
 
 // Registered with Telegram via setMyCommands so they appear in the "/" menu.
 const COMMAND_MENU = [
@@ -89,8 +95,6 @@ const SOURCE_ALIASES = {
 function createBot(token) {
   const bot = new Bot(token);
   const conversationHistory = new Map();
-  const messageQueue = new Map();
-  const processing = new Set();
   const activeReminders = new Map();
   let updateInProgress = false;
 
@@ -103,6 +107,97 @@ function createBot(token) {
     const history = getHistory(chatId);
     history.push({ role, content });
     if (history.length > 30) history.splice(0, history.length - 30);
+  }
+
+  // ---- Typing indicator ----------------------------------------------------
+  // Show Telegram's "typing…" bubble while we work so the user knows their
+  // message landed and something is happening. It auto-expires after ~5s, so we
+  // refresh it on an interval and clear it when the work is done.
+  function startTyping(ctx) {
+    const ping = () => { try { ctx.api.sendChatAction(ctx.chat.id, 'typing').catch(() => {}); } catch (_) {} };
+    ping();
+    const iv = setInterval(ping, 4000);
+    return () => clearInterval(iv);
+  }
+
+  async function withTyping(ctx, fn) {
+    const stop = startTyping(ctx);
+    try {
+      return await fn();
+    } finally {
+      stop();
+    }
+  }
+
+  // ---- Intelligent multitasking queue --------------------------------------
+  // When a request arrives while another is running we don't stop the running
+  // one. We classify the newcomer (queue / preempt / cancel) and acknowledge it
+  // so the user is never left wondering. The classifier only runs when we're
+  // actually busy (so an idle bot pays nothing), and a free keyword fast-path
+  // handles the obvious "do it now" / "never mind" cases before any LLM call.
+  async function classifyInterrupt({ text, current }) {
+    const prefs = loadPreferences();
+    const available = getAvailableModels();
+    const model = available.includes(prefs.model) ? prefs.model : available[0];
+    if (!model) return 'queue'; // no model → safest default, never interrupt
+    const sys =
+      'You triage incoming messages for an assistant that is CURRENTLY BUSY with another task. ' +
+      'Reply with exactly ONE word:\n' +
+      'QUEUE = handle it after the current task finishes (the default for normal requests),\n' +
+      'PREEMPT = the user wants a quick answer right now or asked to do it first,\n' +
+      'CANCEL = the user wants to cancel what they previously asked for.\n' +
+      'Reply with ONLY the single word.';
+    const usr = `Current task: ${current || 'a task in progress'}\nNew message: "${(text || '').slice(0, 300)}"\nOne word:`;
+    try {
+      const out = await chat(model, [{ role: 'system', content: sys }, { role: 'user', content: usr }]);
+      const w = (out || '').toUpperCase();
+      if (w.includes('PREEMPT')) return 'preempt';
+      if (w.includes('CANCEL')) return 'cancel';
+      return 'queue';
+    } catch (e) {
+      console.error('[Queue] classify failed, defaulting to queue:', e.message);
+      return 'queue';
+    }
+  }
+
+  async function ackTask({ intent, task, current, dropped }) {
+    const ctx = task.ctx;
+    if (!ctx) return;
+    const curLabel = current && current.label ? current.label : "what I'm working on";
+    try {
+      if (intent === 'preempt') {
+        const other = curLabel === "what I'm working on" ? 'the other task' : curLabel;
+        await ctx.reply(`⚡ Doing that right now — I'll keep ${other} running too.`);
+      } else if (intent === 'cancel') {
+        await ctx.reply(
+          dropped > 0
+            ? `🗑️ Done — cancelled ${dropped} queued task${dropped === 1 ? '' : 's'}. I'll let what's already running finish.`
+            : "🗑️ Nothing was waiting in the queue to cancel — and I won't cut off what's already running."
+        );
+      } else {
+        await ctx.reply(`👍 Got it — I'll get to that right after I finish ${curLabel}.`);
+      }
+    } catch (e) {
+      console.error('[Queue] ack failed:', e.message);
+    }
+  }
+
+  const taskQueue = createTaskQueue({
+    classify: classifyInterrupt,
+    onAck: ackTask,
+    log: (m) => console.log('[Queue]', m),
+  });
+
+  // Submit a unit of work. `text` feeds the classifier, `label` is a friendly
+  // name used in acknowledgements, `run` is the async worker. Typing shows for
+  // the duration of the actual work.
+  function submitTask(ctx, chatId, { text, label, run }) {
+    return taskQueue.submit(chatId, {
+      text,
+      label,
+      ctx,
+      run: () => withTyping(ctx, run),
+    });
   }
 
   bot.command('start', async (ctx) => {
@@ -130,12 +225,13 @@ function createBot(token) {
   // On-demand project ideas. The daily report no longer carries a PROJECT IDEAS
   // section (it's now a tight Top-3 + signal); users pull ideas when they want
   // them. Reuses the normal text pipeline so it fetches live data and synthesizes.
-  bot.command('ideas', async (ctx) => {
+  bot.command('ideas', (ctx) => {
     console.log(`[Bot] /ideas from ${ctx.from?.first_name} (${ctx.from?.id})`);
     const chatId = ctx.chat.id;
-    queueMessage(ctx, chatId, {
-      type: 'text',
-      text: 'Brainstorm 3 genuinely creative, buildable project ideas inspired by what is trending RIGHT NOW across GitHub, Hacker News, Reddit, Product Hunt and Dev.to. Fetch today\'s live data first, then for each idea give a one-line concept, a suggested tech stack, and who it is for. Be original and avoid generic CRUD apps.',
+    submitTask(ctx, chatId, {
+      text: '/ideas — creative project ideas',
+      label: 'those project ideas',
+      run: () => processTextMessage(ctx, chatId, IDEAS_PROMPT),
     });
   });
 
@@ -165,7 +261,7 @@ function createBot(token) {
         `Uptime: ${formatUptime(process.uptime())}`,
         `Model: ${activeModel}${modelNote}`,
         `Models with key: ${available.length}/${all.length}`,
-        `Default report: ${scheduleLabel(prefs)}`,
+        `Daily report: ${prefs.reportEnabled === false ? 'off' : humanizeCron(prefs.reportCron || '0 6 * * *')}`,
         `Custom schedules: ${custom.length}`,
         `Sources: ${enabled.join(', ')}`,
         `Timezone: ${prefs.timezone}`,
@@ -256,17 +352,24 @@ function createBot(token) {
     }
   });
 
-  bot.command('report', async (ctx) => {
+  bot.command('report', (ctx) => {
     console.log(`[Bot] /report requested by ${ctx.from?.id}`);
-    await ctx.reply('📡 Generating your trend report now…');
-    try {
-      const report = await generateDailyReport();
-      await sendReportHTML(bot.api, ctx.chat.id, report);
-    } catch (e) {
-      console.error('[Bot] /report failed:', e.message);
-      const explanation = await handleError({ err: e, where: 'generating your trend report' });
-      await sendLong(ctx, explanation);
-    }
+    const chatId = ctx.chat.id;
+    submitTask(ctx, chatId, {
+      text: '/report — generate a trend report',
+      label: 'your trend report',
+      run: async () => {
+        await ctx.reply('📡 Generating your trend report now…');
+        try {
+          const report = await generateDailyReport();
+          await sendReportHTML(bot.api, ctx.chat.id, report);
+        } catch (e) {
+          console.error('[Bot] /report failed:', e.message);
+          const explanation = await handleError({ err: e, where: 'generating your trend report' });
+          await sendLong(ctx, explanation);
+        }
+      },
+    });
   });
 
   bot.command('model', async (ctx) => {
@@ -376,10 +479,13 @@ function createBot(token) {
 
   bot.command('schedules', async (ctx) => {
     const all = listSchedules();
-    const lines = all.map((s) => `${s.enabled ? '🟢' : '⚪'} ${s.name} — ${s.description} [${s.cron}]${s.source === 'custom' ? ' (custom)' : ''}`);
     const prefs = loadPreferences();
-    const header = prefs.paused ? '🗓 Schedules (⏸️ all paused — /resume to re-enable):' : '🗓 Schedules:';
-    await ctx.reply(`${header}\n${lines.join('\n')}`);
+    const lines = all.map((s) => describeSchedule(s));
+    const header = prefs.paused
+      ? "🗓 Here's what I have scheduled (everything is paused right now — say /resume to switch it back on):"
+      : "🗓 Here's what I have scheduled for you:";
+    const tip = '\n\nWant to change anything? Just tell me in plain words — e.g. "send the report at 8am instead" or "add a Friday 5pm digest".';
+    await ctx.reply(`${header}\n\n${lines.join('\n')}${tip}`);
   });
 
   bot.command('pause', async (ctx) => {
@@ -447,45 +553,27 @@ function createBot(token) {
     return text;
   }
 
-  function queueMessage(ctx, chatId, payload) {
-    if (processing.has(chatId)) {
-      if (!messageQueue.has(chatId)) messageQueue.set(chatId, { items: [], ctx });
-      messageQueue.get(chatId).items.push(payload);
-      messageQueue.get(chatId).ctx = ctx;
-      return;
-    }
-
-    processing.add(chatId);
-    (async () => {
-      try {
-        await processPayload(ctx, chatId, payload);
-
-        while (messageQueue.has(chatId) && messageQueue.get(chatId).items.length > 0) {
-          const queue = messageQueue.get(chatId);
-          const item = queue.items.shift();
-          await processPayload(queue.ctx, chatId, item);
-        }
-      } catch (err) {
-        console.error('[Bot] Unhandled processing error:', err.message);
-      } finally {
-        processing.delete(chatId);
-        messageQueue.delete(chatId);
-      }
-    })();
-  }
-
   bot.on('message:text', (ctx) => {
-    if (ctx.message.text === '/start' || ctx.message.text === '/ideas') return;
+    // Commands have their own handlers and stop propagation; this only fires for
+    // plain text (and unknown /commands, which we let the model answer).
+    if (ctx.message.text === '/start') return;
     const chatId = ctx.chat.id;
     const text = buildMessageContext(ctx);
-    queueMessage(ctx, chatId, { type: 'text', text });
+    submitTask(ctx, chatId, {
+      text,
+      run: () => processTextMessage(ctx, chatId, text),
+    });
   });
 
   bot.on('message:sticker', (ctx) => {
     const chatId = ctx.chat.id;
     const emoji = ctx.message.sticker.emoji || '🙂';
     const setName = ctx.message.sticker.set_name || 'custom';
-    queueMessage(ctx, chatId, { type: 'text', text: `[Sticker: ${emoji} from "${setName}"]` });
+    const text = `[Sticker: ${emoji} from "${setName}"]`;
+    submitTask(ctx, chatId, {
+      text,
+      run: () => processTextMessage(ctx, chatId, text),
+    });
   });
 
   bot.on(['message:document', 'message:photo'], async (ctx) => {
@@ -510,22 +598,19 @@ function createBot(token) {
       return;
     }
 
-    queueMessage(ctx, chatId, {
+    const payload = {
       type: 'file',
       fileId,
       fileName,
       fileType: fileType || 'image',
       caption: caption || 'Analyze this file',
+    };
+    submitTask(ctx, chatId, {
+      text: caption || `a file (${fileName})`,
+      label: 'that file',
+      run: () => processFileMessage(ctx, chatId, payload),
     });
   });
-
-  async function processPayload(ctx, chatId, payload) {
-    if (payload.type === 'file') {
-      await processFileMessage(ctx, chatId, payload);
-    } else {
-      await processTextMessage(ctx, chatId, payload.text);
-    }
-  }
 
   async function processFileMessage(ctx, chatId, payload) {
     const prefs = loadPreferences();
@@ -684,8 +769,10 @@ function createBot(token) {
       if (r.type === 'confirmation') {
         if (typeof r.result === 'object') {
           if (r.result.success === false) parts.push(`Failed: ${r.result.error}`);
-          else if (r.result.name) parts.push(`Done: ${r.result.description || r.result.name}`);
-          else parts.push('Done!');
+          else if (r.result.name) {
+            const when = r.result.cron ? ` — ${humanizeCron(r.result.cron)}` : '';
+            parts.push(`Done: ${r.result.description || r.result.name}${when}`);
+          } else parts.push('Done!');
         } else {
           parts.push(String(r.result));
         }
@@ -1043,7 +1130,8 @@ RESPONSE FORMAT (CRITICAL):
 - Use emoji for visual structure
 - Use numbered lists and dashes
 - Use ALL CAPS sparingly for emphasis
-- Be conversational, detailed, and insightful`;
+- Be conversational, detailed, and insightful
+- When you mention schedules or times, describe them in plain English (e.g. "every day at 6 AM", "every Friday at 5 PM") — NEVER show raw cron expressions or internal schedule ids to the user`;
   }
 
   function parseResponse(text) {

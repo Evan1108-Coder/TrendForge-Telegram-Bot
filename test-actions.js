@@ -759,6 +759,164 @@ const mockDeps = (over = {}) => ({
     assert(/kept|preserv/i.test(msg), 'reassures data is preserved');
   });
 
+  // === ROUND 8: intelligent multitasking queue (v3.6) ===
+  const { createTaskQueue, classifyByKeyword } = require('./src/taskqueue');
+
+  // Deterministic async controls so timing-sensitive queue tests don't flake.
+  function tqDeferred() {
+    let resolve;
+    const p = new Promise((r) => { resolve = r; });
+    return { p, resolve };
+  }
+  const tqTick = () => new Promise((r) => setTimeout(r, 0));
+  const tqSettle = async () => { await tqTick(); await tqTick(); await tqTick(); };
+
+  console.log('\n=== ROUND 8: intelligent multitasking queue (v3.6) ===\n');
+
+  test('classifyByKeyword: detects preempt / cancel / none', () => {
+    assert(classifyByKeyword('quickly answer this') === 'preempt', 'quickly → preempt');
+    assert(classifyByKeyword('can you do this first') === 'preempt', 'do this first → preempt');
+    assert(classifyByKeyword('answer me now') === 'preempt', 'answer me now → preempt');
+    assert(classifyByKeyword('cancel that') === 'cancel', 'cancel → cancel');
+    assert(classifyByKeyword('never mind') === 'cancel', 'never mind → cancel');
+    assert(classifyByKeyword('what is trending on github') === null, 'normal → null');
+  });
+
+  await atest('taskqueue: idle task runs immediately with no acknowledgement', async () => {
+    const acks = [];
+    const order = [];
+    const q = createTaskQueue({ onAck: async (i) => acks.push(i.intent) });
+    const r = await q.submit('c1', { text: 'hi', run: async () => { order.push('ran'); } });
+    assert(r === 'run', `expected run, got ${r}`);
+    await tqSettle();
+    assert(order[0] === 'ran', 'task executed');
+    assert(acks.length === 0, 'no ack when idle');
+  });
+
+  await atest('taskqueue: busy → new task is queued, ack sent, runs after current', async () => {
+    const order = [];
+    const acks = [];
+    const q = createTaskQueue({ onAck: async (i) => acks.push(i.intent) });
+    const d1 = tqDeferred();
+    const r1 = await q.submit('c2', { text: 'first', run: async () => { order.push('start1'); await d1.p; order.push('end1'); } });
+    assert(r1 === 'run', 'first runs immediately');
+    const r2 = await q.submit('c2', { text: 'second please', run: async () => { order.push('run2'); } });
+    assert(r2 === 'queue', `expected queue, got ${r2}`);
+    assert(acks.length === 1 && acks[0] === 'queue', 'queue was acknowledged');
+    await tqTick();
+    assert(!order.includes('run2'), 'queued task waits for the running one');
+    d1.resolve();
+    await tqSettle();
+    assert(order.join(',') === 'start1,end1,run2', `order was ${order.join(',')}`);
+  });
+
+  await atest('taskqueue: "quick" pre-empts and runs in parallel without stopping current', async () => {
+    const order = [];
+    const acks = [];
+    const q = createTaskQueue({ onAck: async (i) => acks.push(i.intent) });
+    const d1 = tqDeferred();
+    await q.submit('c3', { text: 'long running task', run: async () => { order.push('s1'); await d1.p; order.push('e1'); } });
+    const d2 = tqDeferred();
+    const r2 = await q.submit('c3', { text: 'quick question: ping?', run: async () => { order.push('preempt-run'); d2.resolve(); } });
+    assert(r2 === 'preempt', `expected preempt, got ${r2}`);
+    assert(acks[0] === 'preempt', 'preempt acknowledged');
+    await d2.p;
+    await tqTick();
+    assert(order.includes('preempt-run'), 'preempt ran immediately');
+    assert(!order.includes('e1'), 'current task was NOT stopped/finished early');
+    d1.resolve();
+    await tqSettle();
+    assert(order.join(',') === 's1,preempt-run,e1', `order was ${order.join(',')}`);
+  });
+
+  await atest('taskqueue: "cancel" clears the pending queue but never kills the running task', async () => {
+    const order = [];
+    let droppedSeen = -1;
+    const q = createTaskQueue({ onAck: async (i) => { if (i.intent === 'cancel') droppedSeen = i.dropped; } });
+    const d1 = tqDeferred();
+    await q.submit('c4', { text: 'task one', run: async () => { order.push('s1'); await d1.p; order.push('e1'); } });
+    await q.submit('c4', { text: 'task two', run: async () => { order.push('run2'); } });
+    const r3 = await q.submit('c4', { text: 'actually cancel that', run: async () => { order.push('run3'); } });
+    assert(r3 === 'cancel', `expected cancel, got ${r3}`);
+    assert(droppedSeen === 1, `expected 1 dropped, got ${droppedSeen}`);
+    d1.resolve();
+    await tqSettle();
+    assert(order.includes('e1'), 'running task still finished');
+    assert(!order.includes('run2'), 'queued task was cancelled');
+    assert(!order.includes('run3'), 'the cancel message itself is not run as a task');
+  });
+
+  await atest('taskqueue: LLM classifier decides preempt for ambiguous text', async () => {
+    const order = [];
+    const q = createTaskQueue({ classify: async () => 'preempt' });
+    const d1 = tqDeferred();
+    await q.submit('c5', { text: 'first', run: async () => { order.push('s1'); await d1.p; } });
+    const r2 = await q.submit('c5', { text: 'please handle this one', run: async () => { order.push('p2'); } });
+    assert(r2 === 'preempt', `expected preempt via LLM, got ${r2}`);
+    d1.resolve();
+    await tqSettle();
+    assert(order.includes('p2'), 'preempt task ran');
+  });
+
+  await atest('taskqueue: classifier failure defaults to queue (never interrupts)', async () => {
+    const q = createTaskQueue({ classify: async () => { throw new Error('llm down'); } });
+    const d1 = tqDeferred();
+    await q.submit('c6', { text: 'a', run: async () => { await d1.p; } });
+    const r2 = await q.submit('c6', { text: 'ambiguous with no keyword', run: async () => {} });
+    assert(r2 === 'queue', `expected queue fallback, got ${r2}`);
+    d1.resolve();
+    await tqSettle();
+  });
+
+  await atest('taskqueue: multiple queued tasks run in FIFO order', async () => {
+    const order = [];
+    const q = createTaskQueue({ onAck: async () => {} });
+    const d1 = tqDeferred();
+    await q.submit('c7', { text: 'one', run: async () => { order.push(1); await d1.p; } });
+    await q.submit('c7', { text: 'two', run: async () => { order.push(2); } });
+    await q.submit('c7', { text: 'three', run: async () => { order.push(3); } });
+    d1.resolve();
+    await tqSettle();
+    assert(order.join(',') === '1,2,3', `FIFO order broke: ${order.join(',')}`);
+  });
+
+  // === ROUND 9: human-friendly output (v3.6) ===
+  const { humanizeCron, describeSchedule, formatTime } = require('./src/humanize');
+
+  console.log('\n=== ROUND 9: human-friendly output (v3.6) ===\n');
+
+  test('humanizeCron: daily / weekly / hourly-step read naturally', () => {
+    assert(humanizeCron('0 6 * * *') === 'every day at 6:00 AM', humanizeCron('0 6 * * *'));
+    assert(humanizeCron('0 21 * * *') === 'every day at 9:00 PM', humanizeCron('0 21 * * *'));
+    assert(humanizeCron('30 9 * * 1') === 'every Monday at 9:30 AM', humanizeCron('30 9 * * 1'));
+    assert(humanizeCron('0 */6 * * *') === 'every 6 hours', humanizeCron('0 */6 * * *'));
+    assert(humanizeCron('*/15 * * * *') === 'every 15 minutes', humanizeCron('*/15 * * * *'));
+  });
+
+  test('humanizeCron: never leaks raw cron for known patterns; degrades safely', () => {
+    assert(!/\*/.test(humanizeCron('0 9 * * 1-5')), 'weekday range has no asterisks');
+    assert(humanizeCron('0 9 * * 1-5').includes('Mon'), 'weekday range mentions weekdays');
+    // Exotic expression should still return a string, not throw.
+    const exotic = humanizeCron('7 3 */2 6 5');
+    assert(typeof exotic === 'string' && exotic.length > 0, 'exotic cron still describable');
+  });
+
+  test('formatTime: 24h → 12h with AM/PM', () => {
+    assert(formatTime(6, 0) === '6:00 AM', formatTime(6, 0));
+    assert(formatTime(0, 5) === '12:05 AM', formatTime(0, 5));
+    assert(formatTime(12, 0) === '12:00 PM', formatTime(12, 0));
+    assert(formatTime(23, 30) === '11:30 PM', formatTime(23, 30));
+  });
+
+  test('describeSchedule: friendly line, no internal id or raw cron', () => {
+    const line = describeSchedule({ name: 'default-report', cron: '0 6 * * *', enabled: true, source: 'preferences' });
+    assert(line.includes('Your daily trend report'), 'friendly title');
+    assert(line.includes('6:00 AM'), 'human time');
+    assert(!line.includes('0 6 * * *') && !line.includes('default-report'), 'no cron or id leaked');
+    const paused = describeSchedule({ name: 'standup', cron: '0 9 * * 1-5', enabled: false, source: 'custom', description: 'Weekday standup' });
+    assert(/pause/i.test(paused), 'shows paused state');
+  });
+
   // Clean up test data
   console.log('\n--- Cleanup ---');
   if (fs.existsSync(memFile)) fs.unlinkSync(memFile);
