@@ -12,6 +12,7 @@ const { restartCron, stopCron, scheduleLabel } = require('./cron');
 const { addSchedule, removeSchedule, listSchedules, restartAllSchedules } = require('./schedules');
 const { saveNote, readNote, deleteNote, listNotes } = require('./notes');
 const { addMemory, listMemories, rawMemories, forgetMemory } = require('./memory');
+const { addReminder, removeReminder, listReminders } = require('./reminders');
 const { generateDailyReport } = require('./report');
 const { sendReportHTML, escapeHtml } = require('./render');
 const { fetchGitHubTrendingByPrefs } = require('./scrapers/github');
@@ -101,6 +102,49 @@ function createBot(token) {
   const conversationHistory = new Map();
   const activeReminders = new Map();
   let updateInProgress = false;
+
+  // ---- Durable reminders ---------------------------------------------------
+  // Reminders are persisted to disk (reminders.json) so they survive a restart.
+  // armReminder schedules the in-memory timer for one stored reminder; when it
+  // fires (or is found overdue) we send the message and delete it from disk.
+  function fireReminder(entry, { late = false } = {}) {
+    const prefix = late ? '⏰ Reminder (delayed by a restart): ' : '⏰ Reminder: ';
+    bot.api.sendMessage(entry.chatId, `${prefix}${entry.message}`).catch((e) => {
+      console.error('[Reminder] Failed to send:', e.message);
+    });
+    removeReminder(entry.id);
+    activeReminders.delete(entry.id);
+  }
+
+  function armReminder(entry) {
+    const delay = Math.max(0, (entry.firesAt || 0) - Date.now());
+    // Node caps setTimeout at ~24.8 days; reminders are capped at 24h so this is
+    // always safe, but clamp defensively.
+    const timer = setTimeout(() => fireReminder(entry), Math.min(delay, 2_147_483_647));
+    if (typeof timer.unref === 'function') timer.unref();
+    activeReminders.set(entry.id, { ...entry, timer });
+  }
+
+  // On startup, re-arm everything still pending and immediately fire anything
+  // that came due while the bot was down (so a restart never silently drops a
+  // reminder). Returns counts for logging.
+  function restoreReminders() {
+    const entries = listReminders();
+    const now = Date.now();
+    let armed = 0;
+    let fired = 0;
+    for (const entry of entries) {
+      if ((entry.firesAt || 0) <= now) {
+        fireReminder(entry, { late: true });
+        fired += 1;
+      } else {
+        armReminder(entry);
+        armed += 1;
+      }
+    }
+    return { armed, fired };
+  }
+  bot.restoreReminders = restoreReminders;
 
   function getHistory(chatId) {
     if (!conversationHistory.has(chatId)) conversationHistory.set(chatId, []);
@@ -873,18 +917,12 @@ function createBot(token) {
       }
 
       case 'reminder': {
-        const delayMin = params.delay_minutes || params.minutes || 1;
+        const delayMin = Math.max(1, Math.min(params.delay_minutes || params.minutes || 1, 1440));
         const msg = params.message || 'Reminder!';
-        const delayMs = Math.max(1, Math.min(delayMin, 1440)) * 60 * 1000;
-        const timerId = setTimeout(async () => {
-          try {
-            await ctx.reply(`⏰ Reminder: ${msg}`);
-          } catch (e) {
-            console.error('[Reminder] Failed:', e.message);
-          }
-          activeReminders.delete(timerId);
-        }, delayMs);
-        activeReminders.set(timerId, { message: msg, chatId, firesAt: Date.now() + delayMs });
+        const firesAt = Date.now() + delayMin * 60 * 1000;
+        // Persist first so the reminder survives a restart, then arm the timer.
+        const entry = addReminder({ message: msg, chatId, firesAt });
+        armReminder(entry);
         return { type: 'confirmation', action: type, result: `Reminder set for ${delayMin} minute(s): "${msg}"` };
       }
 

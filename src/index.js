@@ -31,6 +31,10 @@ async function main() {
       } catch (e) {
         console.error('   setMyCommands failed:', e.message);
       }
+      if (typeof bot.restoreReminders === 'function') {
+        const { armed, fired } = bot.restoreReminders();
+        if (armed || fired) console.log(`   Reminders restored: ${armed} re-armed, ${fired} fired (were overdue)`);
+      }
       console.log(`🔨 TrendForge v${VERSION} running as @${info.username}`);
       console.log(`   Model: ${prefs.model}`);
       console.log(`   Available models: ${available.length}`);

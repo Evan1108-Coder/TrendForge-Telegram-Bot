@@ -4,4 +4,5 @@ preferences.json
 notes.json
 schedules.json
 memories.json
+reminders.json
 *.log

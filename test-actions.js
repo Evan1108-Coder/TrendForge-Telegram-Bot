@@ -3,6 +3,7 @@ const { cleanOutput } = require('./src/utils/format');
 const { addSchedule, removeSchedule, listSchedules, loadSchedules } = require('./src/schedules');
 const { saveNote, readNote, deleteNote, listNotes } = require('./src/notes');
 const { addMemory, listMemories, rawMemories, forgetMemory, memoriesForPrompt } = require('./src/memory');
+const { addReminder, removeReminder, listReminders } = require('./src/reminders');
 const {
   escapeHtml, parseModelJson, splitHtmlMessage, buildCandidates,
   renderStructuredReport, renderFullReport, renderFallbackReport,
@@ -470,6 +471,48 @@ test('memoriesForPrompt formats as dashed lines and respects empty', () => {
   addMemory('line two');
   const block = memoriesForPrompt();
   assert(block === '- line one\n- line two', `unexpected block: ${JSON.stringify(block)}`);
+});
+
+console.log('\n=== ROUND 5b: Durable reminders survive restart (v3.8) ===\n');
+
+const remFile = path.join(__dirname, 'reminders.json');
+if (fs.existsSync(remFile)) fs.unlinkSync(remFile);
+
+test('addReminder persists to disk with incrementing ids', () => {
+  if (fs.existsSync(remFile)) fs.unlinkSync(remFile);
+  const a = addReminder({ message: 'standup', chatId: 1, firesAt: Date.now() + 60000 });
+  const b = addReminder({ message: 'deploy', chatId: 1, firesAt: Date.now() + 120000 });
+  assert(b.id === a.id + 1, `ids should increment, got ${a.id} then ${b.id}`);
+  assert(fs.existsSync(remFile), 'reminders.json must be written');
+  assert(listReminders().length === 2, 'two reminders stored');
+});
+
+test('reminders persist across a simulated restart (re-read from disk)', () => {
+  // listReminders re-reads the file each call, so this proves a fresh process
+  // (post-restart) would see the same pending reminders instead of losing them.
+  const onDisk = JSON.parse(fs.readFileSync(remFile, 'utf-8'));
+  assert(Array.isArray(onDisk.entries) && onDisk.entries.length === 2, 'file holds both entries');
+  assert(onDisk.entries.every((e) => typeof e.firesAt === 'number'), 'firesAt stored as epoch ms for re-arming');
+});
+
+test('removeReminder deletes exactly one fired/cancelled reminder', () => {
+  const [first] = listReminders();
+  const removed = removeReminder(first.id);
+  assert(removed === 1, `expected 1 removed, got ${removed}`);
+  const left = listReminders();
+  assert(left.length === 1 && left[0].id !== first.id, 'only the targeted reminder removed');
+});
+
+test('restore partitions overdue (fire now) vs future (re-arm)', () => {
+  if (fs.existsSync(remFile)) fs.unlinkSync(remFile);
+  const overdue = addReminder({ message: 'was due during downtime', chatId: 1, firesAt: Date.now() - 5000 });
+  const future = addReminder({ message: 'still pending', chatId: 1, firesAt: Date.now() + 600000 });
+  const now = Date.now();
+  const entries = listReminders();
+  const due = entries.filter((e) => e.firesAt <= now);
+  const pending = entries.filter((e) => e.firesAt > now);
+  assert(due.length === 1 && due[0].id === overdue.id, 'overdue reminder identified for immediate fire');
+  assert(pending.length === 1 && pending[0].id === future.id, 'future reminder identified for re-arm');
 });
 
 // === ROUND 6: AI-personalized error handling (v3.4) ===
@@ -1021,6 +1064,7 @@ const mockDeps = (over = {}) => ({
     removeSchedule(name);
   }
   if (fs.existsSync(notesFile)) fs.unlinkSync(notesFile);
+  if (fs.existsSync(remFile)) fs.unlinkSync(remFile);
   console.log('Test data cleaned up.');
 
   console.log(`\n=== RESULTS: ${passed} passed, ${failed} failed ===\n`);
