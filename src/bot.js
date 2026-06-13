@@ -32,6 +32,7 @@ const IDEAS_PROMPT = 'Brainstorm 3 genuinely creative, buildable project ideas i
 
 // Registered with Telegram via setMyCommands so they appear in the "/" menu.
 const COMMAND_MENU = [
+  { command: 'start', description: 'Welcome & quick start' },
   { command: 'help', description: 'Show all commands' },
   { command: 'report', description: 'Generate a trend report now' },
   { command: 'ideas', description: "Creative project ideas from today's trends" },
@@ -53,6 +54,9 @@ const COMMAND_MENU = [
 
 const HELP_TEXT =
   `🔨 TrendForge v${VERSION} — commands\n\n` +
+  'GETTING STARTED\n' +
+  '/start — welcome message & quick start\n' +
+  '/help — show this command list\n\n' +
   'REPORTS\n' +
   '/report — full trend report right now\n' +
   "/ideas — creative project ideas from today's trends\n" +
