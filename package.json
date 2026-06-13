@@ -1,6 +1,6 @@
 {
   "name": "trendforge-telegram-bot",
-  "version": "3.6.1",
+  "version": "3.7.0",
   "description": "AI-powered Telegram bot that monitors GitHub Trending & Hacker News, generates personalized project ideas",
   "main": "src/index.js",
   "scripts": {

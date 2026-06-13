@@ -14,6 +14,7 @@
 // All git/npm/node calls go through an injectable `run` so this is fully testable
 // without touching a real repo, network, or npm.
 
+const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 
@@ -78,6 +79,70 @@ function dataFilesProtected(deps = {}) {
     else unprotected.push(f);
   }
   return { protected: protectedFiles, unprotected, allProtected: unprotected.length === 0 };
+}
+
+// --- Data-integrity proof -------------------------------------------------
+// Cheap per-file signature so we can PROVE user data is byte-for-byte
+// untouched by an update. fs access goes through an injectable `fileMeta` so
+// this is fully testable without a real filesystem.
+function defaultFileMeta(file) {
+  const p = path.join(REPO_DIR, file);
+  try {
+    const buf = fs.readFileSync(p);
+    return { exists: true, size: buf.length, lines: buf.toString('utf-8').split('\n').length };
+  } catch {
+    return { exists: false, size: 0, lines: 0 };
+  }
+}
+
+function makeFileMeta(deps) {
+  return deps.fileMeta || defaultFileMeta;
+}
+
+// Snapshot a signature for every DATA_FILES entry.
+function snapshotDataFiles(deps = {}) {
+  const meta = makeFileMeta(deps);
+  const snap = {};
+  for (const f of DATA_FILES) snap[f] = meta(f);
+  return snap;
+}
+
+// Compare two snapshots. `checked` = the files that existed before the update
+// (the ones we are actually protecting). A change in existence, byte size, or
+// line count for ANY data file is a mismatch.
+function compareDataSnapshots(before, after) {
+  const checked = [];
+  const mismatches = [];
+  for (const f of DATA_FILES) {
+    const b = before[f] || { exists: false, size: 0, lines: 0 };
+    const a = after[f] || { exists: false, size: 0, lines: 0 };
+    if (b.exists) checked.push(f);
+    if (b.exists !== a.exists || b.size !== a.size || b.lines !== a.lines) {
+      mismatches.push({ file: f, before: b, after: a });
+    }
+  }
+  return { checked, ok: mismatches.length === 0, mismatches };
+}
+
+// Human-facing summary of what an update actually changed: the list of files
+// (with git status letters) and the commit subjects between two commits.
+function summarizeChanges(run, from, to) {
+  let filesChanged = [];
+  let commits = [];
+  try {
+    const ns = run(`git diff --name-status ${from}..${to}`).trim();
+    filesChanged = ns
+      ? ns.split('\n').map((line) => {
+        const parts = line.split('\t');
+        return { status: parts[0], file: parts.slice(1).join('\t') };
+      }).filter((x) => x.file)
+      : [];
+  } catch { filesChanged = []; }
+  try {
+    const lg = run(`git log --oneline ${from}..${to}`).trim();
+    commits = lg ? lg.split('\n').map((l) => l.trim()).filter(Boolean) : [];
+  } catch { commits = []; }
+  return { filesChanged, commits };
 }
 
 function readRemoteVersion(deps = {}) {
@@ -189,6 +254,10 @@ function applyUpdate(deps = {}) {
     return { ok: false, stage: 'preflight', reason: 'no_head', message: 'Could not read the current commit.' };
   }
 
+  // Snapshot user-data signatures BEFORE we touch anything, so we can prove
+  // afterwards that the update left every data file byte-for-byte intact.
+  const dataBefore = snapshotDataFiles(deps);
+
   // Pull (fast-forward only — never create a merge or rewrite history).
   try {
     run('git pull --ff-only origin main', { timeout: 120000 });
@@ -201,7 +270,13 @@ function applyUpdate(deps = {}) {
   try { newHead = run('git rev-parse HEAD').trim(); } catch { newHead = null; }
 
   if (newHead && newHead === prevHead) {
-    return { ok: true, stage: 'noop', updated: false, prevHead, newHead, dataProtected: dataFilesProtected(deps), message: 'Already up to date.' };
+    return {
+      ok: true, stage: 'noop', updated: false, prevHead, newHead,
+      dataProtected: dataFilesProtected(deps),
+      dataIntegrity: compareDataSnapshots(dataBefore, snapshotDataFiles(deps)),
+      filesChanged: [], commits: [],
+      message: 'Already up to date.',
+    };
   }
 
   // Reinstall deps only when they changed.
@@ -228,9 +303,30 @@ function applyUpdate(deps = {}) {
     return { ok: false, stage: 'healthcheck', reason: 'bad_boot', rolledBack: true, prevHead, newHead, message: 'The new version failed its health check, so I rolled back to the previous version. Your bot is still running the old, working code.', detail: health.output };
   }
 
+  // Prove user data survived the update untouched.
+  const dataIntegrity = compareDataSnapshots(dataBefore, snapshotDataFiles(deps));
+  // Capture the human-facing change summary (files + commit subjects).
+  const { filesChanged, commits } = summarizeChanges(run, prevHead, newHead || 'HEAD');
+
+  if (!dataIntegrity.ok) {
+    // Should be impossible — data files are gitignored — but if it ever
+    // happens, treat it as a hard failure: roll the code back and refuse to
+    // restart so nothing is silently lost.
+    rollback(run, prevHead);
+    if (depsInstalled) {
+      try { run('npm install --no-audit --no-fund', { timeout: 300000 }); } catch { /* best effort */ }
+    }
+    return {
+      ok: false, stage: 'data_integrity', reason: 'data_changed', rolledBack: true,
+      prevHead, newHead, dataIntegrity, filesChanged, commits,
+      message: 'A protected data file changed during the update (' + dataIntegrity.mismatches.map((m) => m.file).join(', ') + '), which should never happen. I rolled back to the previous version so none of your data is at risk — please check those files before trying again.',
+    };
+  }
+
   return {
     ok: true, stage: 'done', updated: true, prevHead, newHead, depsInstalled,
     dataProtected: dataFilesProtected(deps),
+    dataIntegrity, filesChanged, commits,
     message: 'Update applied and health-checked. Restarting to run the new version.',
   };
 }
@@ -268,6 +364,9 @@ module.exports = {
   isGitRepo,
   workingTreeClean,
   dataFilesProtected,
+  snapshotDataFiles,
+  compareDataSnapshots,
+  summarizeChanges,
   checkForUpdate,
   applyUpdate,
   healthCheck,

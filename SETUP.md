@@ -70,7 +70,7 @@ Send these commands to your bot:
 ```
 /setinterests AI, web dev, cloud, databases
 /setlangs TypeScript, Python, Go
-/setmodel minimax-m2.5-lightning
+/setmodel minimax-m2.5
 ```
 
 Or edit `preferences.json` directly.

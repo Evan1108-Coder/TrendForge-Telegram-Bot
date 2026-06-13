@@ -341,7 +341,29 @@ function createBot(token) {
       const dataNote = dp && dp.allProtected
         ? 'All your data (settings, memories, schedules, notes) is preserved.'
         : (dp ? `⚠️ Heads up: these files are NOT gitignored and could be affected: ${dp.unprotected.join(', ')}.` : '');
-      await ctx.reply(`✅ Updated${result.remoteVersion ? ` to v${result.remoteVersion}` : ''} and health check passed. ${dataNote}\n♻️ Restarting now to run the new version…`);
+
+      // Detailed post-update summary: which files changed + the commit list.
+      const fc = result.filesChanged || [];
+      const filesPart = fc.length
+        ? `\n\n📄 Files changed (${fc.length}):\n` +
+          fc.slice(0, 15).map((f) => `• ${f.status}  ${f.file}`).join('\n') +
+          (fc.length > 15 ? `\n…and ${fc.length - 15} more` : '')
+        : '';
+      const cm = result.commits || [];
+      const commitsPart = cm.length
+        ? `\n\n📝 Commits (${cm.length}):\n` +
+          cm.slice(0, 15).map((c) => `• ${c}`).join('\n') +
+          (cm.length > 15 ? `\n…and ${cm.length - 15} more` : '')
+        : '';
+      // Explicit data-integrity proof.
+      const di = result.dataIntegrity;
+      const integrityPart = di
+        ? (di.ok
+          ? `\n\n🔒 Data integrity verified — ${di.checked.length} protected file${di.checked.length === 1 ? '' : 's'} unchanged (byte size + line count match).`
+          : `\n\n⚠️ Data integrity check FAILED for: ${di.mismatches.map((m) => m.file).join(', ')}`)
+        : '';
+
+      await sendLong(ctx, `✅ Updated${result.remoteVersion ? ` to v${result.remoteVersion}` : ''} and health check passed. ${dataNote}${filesPart}${commitsPart}${integrityPart}\n\n♻️ Restarting now to run the new version…`);
 
       // Let Telegram flush the reply, then let pm2 respawn us on the new code.
       setTimeout(() => {

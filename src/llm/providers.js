@@ -3,13 +3,13 @@ const axios = require('axios');
 const PROVIDERS = {
   openai: {
     url: 'https://api.openai.com/v1/chat/completions',
-    models: ['gpt-5.4-pro', 'gpt-5.4-mini', 'gpt-4o', 'gpt-4o-mini'],
+    models: ['gpt-5.5-pro', 'gpt-5.5', 'gpt-5.5-mini', 'gpt-5.4-pro', 'gpt-5.4-mini', 'gpt-4o', 'gpt-4o-mini'],
     authHeader: key => ({ Authorization: `Bearer ${key}` }),
     envKey: 'OPENAI_API_KEY',
   },
   anthropic: {
     url: 'https://api.anthropic.com/v1/messages',
-    models: ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5', 'claude-3.5-sonnet'],
+    models: ['claude-opus-4-7', 'claude-sonnet-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5', 'claude-3.5-sonnet'],
     authHeader: key => ({ 'x-api-key': key, 'anthropic-version': '2023-06-01' }),
     envKey: 'ANTHROPIC_API_KEY',
   },
@@ -30,12 +30,13 @@ const PROVIDERS = {
   },
   minimax: {
     url: 'https://api.minimaxi.chat/v1/chat/completions',
-    models: ['minimax-m2.7', 'minimax-m2.5-lightning'],
+    models: ['minimax-m3', 'minimax-m2.7', 'minimax-m2.5'],
     authHeader: key => ({ Authorization: `Bearer ${key}` }),
     envKey: 'MINIMAX_API_KEY',
     modelMap: {
-      'minimax-m2.7': 'MiniMax-M1',
-      'minimax-m2.5-lightning': 'MiniMax-M1',
+      'minimax-m3': 'MiniMax-M3',
+      'minimax-m2.7': 'MiniMax-M2.7',
+      'minimax-m2.5': 'MiniMax-M2.5',
     },
   },
   moonshot: {
@@ -128,7 +129,9 @@ async function chat(model, messages) {
 }
 
 const VISION_MODELS = new Set([
+  'gpt-5.5-pro', 'gpt-5.5', 'gpt-5.5-mini',
   'gpt-5.4-pro', 'gpt-5.4-mini', 'gpt-4o', 'gpt-4o-mini',
+  'claude-opus-4-7', 'claude-sonnet-4-7',
   'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5', 'claude-3.5-sonnet',
   'gemini-3.1-pro', 'gemini-3-flash', 'gemini-2.5-flash-lite',
   'kimi-k2.5-vision',

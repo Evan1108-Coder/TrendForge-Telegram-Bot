@@ -83,11 +83,11 @@ AI-powered Telegram bot that monitors **5 data sources** daily — GitHub Trendi
 
 | Provider | Models |
 |----------|--------|
-| OpenAI | gpt-5.4-pro, gpt-5.4-mini, gpt-4o, gpt-4o-mini |
-| Anthropic | claude-opus-4-6, claude-sonnet-4-6, claude-haiku-4-5, claude-3.5-sonnet |
+| OpenAI | gpt-5.5-pro, gpt-5.5, gpt-5.5-mini, gpt-5.4-pro, gpt-5.4-mini, gpt-4o, gpt-4o-mini |
+| Anthropic | claude-opus-4-7, claude-sonnet-4-7, claude-opus-4-6, claude-sonnet-4-6, claude-haiku-4-5, claude-3.5-sonnet |
 | Google | gemini-3.1-pro, gemini-3-flash, gemini-2.5-flash-lite |
 | Together AI | llama-4-maverick, llama-4-scout, llama-3.3-70b |
-| MiniMax | minimax-m2.7, minimax-m2.5-lightning |
+| MiniMax | minimax-m3, minimax-m2.7, minimax-m2.5 |
 | Moonshot/Kimi | kimi-latest, kimi-k2-thinking, kimi-k2-turbo-preview, kimi-k2.5-vision, moonshot-v1-128k |
 
 ## Commands

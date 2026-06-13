@@ -648,10 +648,13 @@ const mockDeps = (over = {}) => ({
       if (cmd.includes('rev-parse HEAD')) return state.head + '\n';
       if (cmd.includes('rev-parse origin/main')) return state.remote + '\n';
       if (cmd.includes('rev-list --count')) return String(cfg.behind != null ? cfg.behind : 2) + '\n';
+      if (cmd.includes('git log --oneline')) return (cfg.commits || ['abc123 feat: a', 'def456 fix: b']).join('\n') + '\n';
       if (cmd.includes('git log')) return (cfg.changelog || []).join('\n') + '\n';
       if (cmd.includes('git show origin/main:package.json')) return JSON.stringify({ version: cfg.remoteVersion || '9.9.9' });
       if (cmd.includes('git pull')) { if (cfg.pullFails) throw new Error('pull conflict'); state.head = state.remote; return 'Updating\n'; }
+      if (cmd.includes('git diff --name-status')) return (cfg.nameStatus || 'M\tsrc/x.js\nA\tsrc/y.js') + '\n';
       if (cmd.includes('git diff --name-only')) return (cfg.depsChanged ? 'package.json\nsrc/x.js' : 'src/x.js') + '\n';
+      if (cmd.includes('git log --oneline')) return (cfg.commits || ['abc123 feat: a', 'def456 fix: b']).join('\n') + '\n';
       if (cmd.includes('npm install')) { state.npmRuns++; if (cfg.npmFails) throw new Error('npm ERR! install failed'); return ''; }
       if (cmd.includes('git reset --hard')) { state.resets.push(cmd); state.head = cfg.head || 'aaa111'; return ''; }
       if (cmd.includes('git check-ignore')) {
@@ -757,6 +760,64 @@ const mockDeps = (over = {}) => ({
     assert(msg.includes('feat: a'), 'changelog included');
     assert(msg.includes('/update'), 'tells the user how to apply');
     assert(/kept|preserv/i.test(msg), 'reassures data is preserved');
+  });
+
+  // --- v3.7: update detailed summary + data-integrity proof ---
+  test('compareDataSnapshots: identical signatures → ok, no mismatches', () => {
+    const before = { '.env': { exists: true, size: 100, lines: 10 }, 'preferences.json': { exists: true, size: 50, lines: 5 } };
+    const after = { '.env': { exists: true, size: 100, lines: 10 }, 'preferences.json': { exists: true, size: 50, lines: 5 } };
+    const di = upd.compareDataSnapshots(before, after);
+    assert(di.ok === true, 'should be ok when nothing changed');
+    assert(di.checked.includes('.env'), 'checked lists files that existed before');
+    assert(di.mismatches.length === 0, 'no mismatches');
+  });
+
+  test('compareDataSnapshots: a changed byte size is flagged as a mismatch', () => {
+    const before = { 'memories.json': { exists: true, size: 100, lines: 10 } };
+    const after = { 'memories.json': { exists: true, size: 220, lines: 14 } };
+    const di = upd.compareDataSnapshots(before, after);
+    assert(di.ok === false, 'should NOT be ok when a data file changed');
+    assert(di.mismatches[0].file === 'memories.json', 'flags the changed file');
+  });
+
+  test('snapshotDataFiles: uses injected fileMeta for every DATA_FILES entry', () => {
+    const seen = [];
+    const fileMeta = (f) => { seen.push(f); return { exists: true, size: 1, lines: 1 }; };
+    const snap = upd.snapshotDataFiles({ fileMeta });
+    assert(seen.length === upd.DATA_FILES.length, 'reads every data file');
+    assert(snap['.env'] && snap['.env'].size === 1, 'snapshot keyed by file');
+  });
+
+  test('summarizeChanges: parses name-status files + oneline commits', () => {
+    const { run } = fakeRunner({ nameStatus: 'M\tsrc/a.js\nA\tsrc/b.js', commits: ['c1 feat: x', 'c2 fix: y'] });
+    const s = upd.summarizeChanges(run, 'aaa', 'bbb');
+    assert(s.filesChanged.length === 2 && s.filesChanged[0].status === 'M' && s.filesChanged[0].file === 'src/a.js', `files: ${JSON.stringify(s.filesChanged)}`);
+    assert(s.commits.length === 2 && s.commits[0] === 'c1 feat: x', `commits: ${JSON.stringify(s.commits)}`);
+  });
+
+  test('applyUpdate: success result includes filesChanged, commits and dataIntegrity', () => {
+    const fileMeta = () => ({ exists: true, size: 10, lines: 2 }); // stable → integrity ok
+    const { run } = fakeRunner({ head: 'aaa', remote: 'bbb', depsChanged: false, nameStatus: 'M\tsrc/a.js', commits: ['c1 feat: x'] });
+    const result = upd.applyUpdate({ run, healthCheck: () => ({ ok: true }), fileMeta });
+    assert(result.ok === true && result.updated === true, `result: ${JSON.stringify(result)}`);
+    assert(Array.isArray(result.filesChanged) && result.filesChanged[0].file === 'src/a.js', 'filesChanged surfaced');
+    assert(Array.isArray(result.commits) && result.commits[0] === 'c1 feat: x', 'commits surfaced');
+    assert(result.dataIntegrity && result.dataIntegrity.ok === true, 'data integrity verified');
+  });
+
+  test('applyUpdate: a data-file change during update → failure + rollback', () => {
+    // .env reads as size 100 on the before-snapshot, 200 on the after-snapshot.
+    const seen = {};
+    const fileMeta = (f) => {
+      seen[f] = (seen[f] || 0) + 1;
+      const changed = f === '.env' && seen[f] >= 2;
+      return { exists: true, size: changed ? 200 : 100, lines: changed ? 20 : 10 };
+    };
+    const { run, state } = fakeRunner({ head: 'aaa', remote: 'bbb', depsChanged: false });
+    const result = upd.applyUpdate({ run, healthCheck: () => ({ ok: true }), fileMeta });
+    assert(result.ok === false && result.stage === 'data_integrity', `result: ${JSON.stringify(result)}`);
+    assert(result.rolledBack === true && state.resets.length === 1, 'rolled back on data mismatch');
+    assert(result.dataIntegrity.mismatches.some((m) => m.file === '.env'), 'flags the changed data file');
   });
 
   // === ROUND 8: intelligent multitasking queue (v3.6) ===
@@ -915,6 +976,41 @@ const mockDeps = (over = {}) => ({
     assert(!line.includes('0 6 * * *') && !line.includes('default-report'), 'no cron or id leaked');
     const paused = describeSchedule({ name: 'standup', cron: '0 9 * * 1-5', enabled: false, source: 'custom', description: 'Weekday standup' });
     assert(/pause/i.test(paused), 'shows paused state');
+  });
+
+  // === ROUND 10: provider model registry (v3.7) ===
+  const prov = require('./src/llm/providers');
+
+  console.log('\n=== ROUND 10: provider model registry (v3.7) ===\n');
+
+  test('providers: new flagship models are registered', () => {
+    const all = prov.getAllModels();
+    for (const m of ['gpt-5.5-pro', 'gpt-5.5', 'gpt-5.5-mini', 'claude-opus-4-7', 'claude-sonnet-4-7', 'minimax-m3', 'minimax-m2.5']) {
+      assert(all.includes(m), `missing new model: ${m}`);
+    }
+  });
+
+  test('providers: MiniMax maps to real upstream ids (no dead MiniMax-M1, no fake lightning)', () => {
+    const mm = prov.getProviderForModel('minimax-m3');
+    assert(mm && mm.modelMap['minimax-m3'] === 'MiniMax-M3', 'minimax-m3 → MiniMax-M3');
+    assert(prov.getProviderForModel('minimax-m2.5').modelMap['minimax-m2.5'] === 'MiniMax-M2.5', 'minimax-m2.5 → MiniMax-M2.5');
+    const all = prov.getAllModels();
+    assert(!all.includes('minimax-m2.5-lightning'), 'dead lightning model removed');
+    const minimaxMap = prov.getProviderForModel('minimax-m2.7').modelMap;
+    assert(!Object.values(minimaxMap).includes('MiniMax-M1'), 'no mapping to dead MiniMax-M1');
+  });
+
+  test('providers: new OpenAI + Anthropic flagships support vision', () => {
+    for (const m of ['gpt-5.5-pro', 'gpt-5.5', 'gpt-5.5-mini', 'claude-opus-4-7', 'claude-sonnet-4-7']) {
+      assert(prov.supportsVision(m) === true, `${m} should support vision`);
+    }
+  });
+
+  test('providers: existing models are preserved (additive change)', () => {
+    const all = prov.getAllModels();
+    for (const m of ['gpt-5.4-pro', 'gpt-4o', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5']) {
+      assert(all.includes(m), `existing model dropped: ${m}`);
+    }
   });
 
   // Clean up test data
