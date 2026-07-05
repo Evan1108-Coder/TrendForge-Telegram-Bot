@@ -23,6 +23,10 @@ const { fetchDevToByInterests } = require('./scrapers/devto');
 const { withRetry } = require('./utils/retry');
 const { cleanOutput, sendLong } = require('./utils/format');
 const { classifyFile, downloadTelegramFile, extractText, getImageBase64, getMimeType, getSupportedExtensions } = require('./files');
+const { classifyComplexity, StagedStatus, STAGES } = require('./utils/staged');
+const { runWithDeadline, DeadlineError } = require('./utils/guard');
+const { getWatchManager, parseWatchIntent } = require('./watch-setup');
+const { InlineKeyboard } = require('grammy');
 
 // pm2 process name used by /restart. Override with PM2_PROCESS_NAME for forks.
 const PM2_NAME = process.env.PM2_PROCESS_NAME || 'trendforge';
@@ -46,6 +50,7 @@ const COMMAND_MENU = [
   { command: 'remember', description: 'Save something to memory' },
   { command: 'forget', description: 'Delete from memory' },
   { command: 'schedules', description: 'List active schedules' },
+  { command: 'watches', description: 'List background watches' },
   { command: 'pause', description: 'Pause automatic reports' },
   { command: 'resume', description: 'Resume automatic reports' },
   { command: 'config', description: 'API keys & provider status' },
@@ -287,6 +292,15 @@ function createBot(token) {
 
   bot.command('help', async (ctx) => {
     await ctx.reply(HELP_TEXT);
+  });
+
+  bot.command('watches', (ctx) => showWatches(ctx));
+
+  // Opt-in watch inline buttons (start / decline).
+  bot.on('callback_query:data', async (ctx) => {
+    const data = ctx.callbackQuery.data || '';
+    if (data.startsWith('watch:')) return handleWatchCallback(ctx);
+    return ctx.answerCallbackQuery();
   });
 
   bot.command('version', async (ctx) => {
@@ -629,6 +643,18 @@ function createBot(token) {
     if (ctx.message.text === '/start') return;
     const chatId = ctx.chat.id;
     const text = buildMessageContext(ctx);
+
+    // Quick watch-management phrases handled inline (no model, no queue).
+    const raw = (ctx.message.text || '').trim();
+    if (/^(watches|show watches|list watches|what am i watching)$/i.test(raw)) {
+      return void showWatches(ctx);
+    }
+    const stopMatch = raw.match(/\b(?:stop|cancel)\s+watch(?:ing)?\s*#?(\d+)/i);
+    if (stopMatch) {
+      getWatchManager({ api: ctx.api }).stopWatch(Number(stopMatch[1]));
+      return void ctx.reply(`⏹️ Stopped watch #${stopMatch[1]}.`);
+    }
+
     submitTask(ctx, chatId, {
       text,
       run: () => processTextMessage(ctx, chatId, text),
@@ -769,6 +795,15 @@ function createBot(token) {
   }
 
   async function processTextMessage(ctx, chatId, combinedText) {
+    // Feature 2 (opt-in watch): if the user is asking us to keep an eye on
+    // something, OFFER to watch it in the background rather than answering as
+    // normal chat. We never auto-start — the watch only begins if they tap yes.
+    const watchIntent = parseWatchIntent(combinedText);
+    if (watchIntent) {
+      addToHistory(chatId, 'user', combinedText);
+      return offerWatch(ctx, watchIntent);
+    }
+
     addToHistory(chatId, 'user', combinedText);
 
     const prefs = loadPreferences();
@@ -785,8 +820,20 @@ function createBot(token) {
     const history = getHistory(chatId);
     const systemPrompt = buildSystemPrompt(prefs, allModels);
 
+    // Feature 1 — complexity-gated status. A hello / thanks / short question gets
+    // an instant reply with NO status line; a real request gets a single
+    // edit-in-place trail (thinking → scraping → analysing → done).
+    const { complex } = classifyComplexity(combinedText);
+    const staged = complex ? new StagedStatus(ctx) : null;
+    if (staged) await staged.stage(STAGES.thinking);
+
+    // Feature 2 — hard wall-clock deadline around each model call. A hung
+    // provider can never freeze the chat; it ends as a friendly "took too long".
+    const budgetMs = Number(process.env.LLM_TIMEOUT_MS || 60000) + 5000;
+    const guardedChat = (messages) => runWithDeadline(() => chat(model, messages), budgetMs, { label: 'model reply' });
+
     try {
-      const phase1Response = await chat(model, [
+      const phase1Response = await guardedChat([
         { role: 'system', content: systemPrompt },
         ...history,
       ]);
@@ -794,15 +841,17 @@ function createBot(token) {
       const parsed = parseResponse(phase1Response);
 
       if (parsed.actions.length > 0) {
+        if (staged) await staged.stage(STAGES.scraping, 'figured out what to fetch');
         const results = await executeActions(parsed.actions, prefs, ctx, chatId);
         const hasData = results.some(r => r.type === 'data');
 
         if (hasData) {
           const ack = cleanOutput(parsed.cleanText) || 'Let me process that for you...';
-          await ctx.reply(ack);
+          if (staged) await staged.stage(STAGES.analyzing, 'got the data — making sense of it');
+          else await ctx.reply(ack);
 
           const resultsText = formatActionResults(results);
-          const phase2Response = await chat(model, [
+          const phase2Response = await guardedChat([
             { role: 'system', content: systemPrompt },
             ...history,
             { role: 'assistant', content: ack },
@@ -811,6 +860,7 @@ function createBot(token) {
 
           const cleaned = cleanOutput(phase2Response) || 'Here are the results, but I had trouble formatting them.';
           addToHistory(chatId, 'assistant', cleaned);
+          if (staged) await staged.done();
           await sendLong(ctx, cleaned);
         } else {
           let response = cleanOutput(parsed.cleanText);
@@ -818,19 +868,82 @@ function createBot(token) {
             response = generateConfirmation(results);
           }
           addToHistory(chatId, 'assistant', response);
+          if (staged) await staged.done();
           await sendLong(ctx, response);
         }
       } else {
         let cleaned = cleanOutput(parsed.cleanText);
         if (!cleaned) cleaned = 'I\'m not sure how to respond to that. Try asking about tech trends, schedules, project ideas, or say "show my settings"!';
         addToHistory(chatId, 'assistant', cleaned);
+        if (staged) await staged.done();
         await sendLong(ctx, cleaned);
       }
     } catch (err) {
       console.error('[Bot] Error:', err.message);
+      if (err instanceof DeadlineError) {
+        if (staged) { await staged.tooLong('The model took longer than its time budget.'); return; }
+        await sendLong(ctx, '⏱️ That took too long, so I stopped waiting instead of freezing the chat. Try again, or switch to a faster model with /model.');
+        return;
+      }
       const explanation = await handleError({ err, where: 'processing your message' });
+      if (staged) { await staged.cant(String(explanation).replace(/<[^>]+>/g, '').slice(0, 400)); return; }
       await sendLong(ctx, explanation);
     }
+  }
+
+  // OFFER to watch (opt-in). Shows the current state and asks; the background
+  // watch only starts if the user taps "Yes, keep watching".
+  async function offerWatch(ctx, intent) {
+    const token = `${intent.kind}:${Buffer.from(JSON.stringify({ p: intent.params, l: intent.label })).toString('base64url').slice(0, 3500)}`;
+    const keyboard = new InlineKeyboard()
+      .text('👀 Yes, keep watching', `watch:start:${token}`)
+      .text('❌ No thanks', 'watch:decline');
+    return ctx.reply(
+      `Not there yet. I can keep an eye on ${intent.label} in the background and ping you the moment it happens — you can keep chatting meanwhile. Want me to?`,
+      { reply_markup: keyboard }
+    );
+  }
+
+  async function showWatches(ctx) {
+    const wm = getWatchManager();
+    const rows = wm.listWatches(ctx.chat.id);
+    if (!rows.length) { await ctx.reply('👀 No watches. Ask me to “watch for X to trend” and I’ll offer to keep an eye on it.'); return; }
+    const lines = ['👀 Watches'];
+    for (const r of rows) {
+      const icon = r.status === 'active' ? '🟢' : r.status === 'fired' ? '✅' : r.status === 'timed_out' ? '⏳' : r.status === 'stopped' ? '⏹️' : '⚪';
+      lines.push(`${icon} #${r.id} — ${r.label} (${r.status}, ${r.pollsDone} check${r.pollsDone === 1 ? '' : 's'})`);
+    }
+    lines.push('\nStop one with “stop watch #<id>”.');
+    await ctx.reply(lines.join('\n'));
+  }
+
+  async function handleWatchCallback(ctx) {
+    const data = ctx.callbackQuery?.data || '';
+    const [, action, ...rest] = data.split(':');
+    if (action === 'decline') {
+      await ctx.answerCallbackQuery('No problem.');
+      try { await ctx.editMessageText('👍 Okay, I won’t watch it. Ask any time.'); } catch {}
+      return;
+    }
+    if (action === 'start') {
+      const token = rest.join(':');
+      const kind = token.split(':')[0];
+      const encoded = token.slice(kind.length + 1);
+      let spec;
+      try { spec = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')); }
+      catch { await ctx.answerCallbackQuery('That watch offer expired.'); return; }
+      const wm = getWatchManager({ api: ctx.api });
+      try {
+        const { id } = wm.startWatch({ chatId: ctx.chat.id, label: spec.l, kind, params: spec.p });
+        await ctx.answerCallbackQuery('Watching in the background.');
+        try { await ctx.editMessageText(`👀 Watching (#${id}). I’ll ping you the moment ${spec.l} — keep chatting, I’m on it. Stop with “stop watch #${id}”.`); } catch {}
+      } catch (err) {
+        await ctx.answerCallbackQuery('Could not start.');
+        try { await ctx.editMessageText(`⚠️ ${err.message}`); } catch {}
+      }
+      return;
+    }
+    return ctx.answerCallbackQuery();
   }
 
   function generateConfirmation(results) {
@@ -1340,6 +1453,17 @@ RESPONSE FORMAT (CRITICAL):
     }
 
     return text;
+  }
+
+  // Bring opt-in background watches back after a restart. Any watch whose
+  // deadline passed while the bot was down is closed out (and the user told),
+  // so nothing is silently lost — and none of this blocks startup.
+  try {
+    const wm = getWatchManager(bot);
+    const { resumed } = wm.resumeWatches();
+    if (resumed) console.log(`[Watch] Resumed ${resumed} active watch${resumed === 1 ? '' : 'es'}.`);
+  } catch (err) {
+    console.error('[Watch] resume failed:', err.message);
   }
 
   return bot;
