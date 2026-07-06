@@ -22,6 +22,7 @@ const { fetchProductHunt } = require('./scrapers/producthunt');
 const { fetchDevToByInterests } = require('./scrapers/devto');
 const { withRetry } = require('./utils/retry');
 const { cleanOutput, sendLong } = require('./utils/format');
+const { formatTelegramReply, formatEvidence } = require('./utils/tgformat');
 const { classifyFile, downloadTelegramFile, extractText, getImageBase64, getMimeType, getSupportedExtensions } = require('./files');
 const { classifyComplexity, StagedStatus, STAGES, openingStage } = require('./utils/staged');
 const { runWithDeadline, DeadlineError } = require('./utils/guard');
@@ -865,26 +866,27 @@ function createBot(token) {
           ]);
 
           const cleaned = cleanOutput(phase2Response) || 'Here are the results, but I had trouble formatting them.';
-          remember(chatId, { action: 'executed requested actions', evidence: formatActionResults(results).slice(0, 400), result: cleaned.slice(0, 200) });
+          remember(chatId, { action: 'executed requested actions', evidence: formatActionResults(results).slice(0, 700), result: cleaned.slice(0, 300), version: VERSION, model, actions: parsed.actions.map(a => a.type || a.action).join(','), cost: 'not reported by provider', terminal: results.filter(r => r.type === 'system').map(r => r.result || r.error).join('\n').slice(0, 500) });
           addToHistory(chatId, 'assistant', cleaned);
           if (staged) await staged.done();
-          await sendLong(ctx, cleaned);
+          await sendLong(ctx, formatTelegramReply(cleaned, { title: 'TrendForge result', emoji: '📊' }), { parse_mode: 'HTML', disable_web_page_preview: true });
         } else {
           let response = cleanOutput(parsed.cleanText);
           if (!response) {
             response = generateConfirmation(results);
           }
-          remember(chatId, { action: 'responded without external action', evidence: combinedText.slice(0, 160), result: response.slice(0, 200) });
+          remember(chatId, { action: 'responded without external action', evidence: combinedText.slice(0, 240), result: response.slice(0, 300), version: VERSION, model, cost: 'not reported by provider' });
           addToHistory(chatId, 'assistant', response);
           if (staged) await staged.done();
-          await sendLong(ctx, response);
+          await sendLong(ctx, formatTelegramReply(response, { title: 'TrendForge reply', emoji: '💡' }), { parse_mode: 'HTML', disable_web_page_preview: true });
         }
       } else {
         let cleaned = cleanOutput(parsed.cleanText);
         if (!cleaned) cleaned = 'I\'m not sure how to respond to that. Try asking about tech trends, schedules, project ideas, or say "show my settings"!';
+        remember(chatId, { action: 'answered directly', evidence: combinedText.slice(0, 240), result: cleaned.slice(0, 300), version: VERSION, model, cost: 'not reported by provider' });
         addToHistory(chatId, 'assistant', cleaned);
         if (staged) await staged.done();
-        await sendLong(ctx, cleaned);
+        await sendLong(ctx, formatTelegramReply(cleaned, { title: 'TrendForge reply', emoji: '💬' }), { parse_mode: 'HTML', disable_web_page_preview: true });
       }
     } catch (err) {
       console.error('[Bot] Error:', err.message);

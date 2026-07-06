@@ -1,3 +1,35 @@
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function mdToHtml(input) {
+  let s = String(input ?? '');
+  if (!s.trim()) return '';
+  const blocks = [];
+  s = s.replace(/```[a-zA-Z0-9_-]*\n?([\s\S]*?)```/g, (_, code) => {
+    blocks.push(code.replace(/\n+$/, ''));
+    return ` PRE${blocks.length - 1} `;
+  });
+  const inlines = [];
+  s = s.replace(/`([^`\n]+)`/g, (_, code) => {
+    inlines.push(code);
+    return ` CODE${inlines.length - 1} `;
+  });
+  s = escapeHtml(s);
+  s = s.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, text, url) => `<a href="${escapeHtml(url)}">${text}</a>`);
+  s = s.replace(/^\s{0,3}#{1,6}\s+(.+?)\s*#*$/gm, '<b>$1</b>');
+  s = s.replace(/\*\*([^\n]+?)\*\*/g, '<b>$1</b>');
+  s = s.replace(/(^|[^*])\*([^*\n]+?)\*(?!\*)/g, '$1<i>$2</i>');
+  s = s.replace(/^(\s*)[-*]\s+/gm, '$1• ');
+  s = s.replace(/ CODE(\d+) /g, (_, i) => `<code>${escapeHtml(inlines[Number(i)])}</code>`);
+  s = s.replace(/ PRE(\d+) /g, (_, i) => `<pre>${escapeHtml(blocks[Number(i)])}</pre>`);
+  return s.trim();
+}
+
 function cleanOutput(text) {
   if (!text) return '';
   return text
@@ -24,10 +56,10 @@ function cleanOutput(text) {
     .trim();
 }
 
-async function sendLong(ctx, text) {
+async function sendLong(ctx, text, options = {}) {
   const maxLen = 4000;
   if (text.length <= maxLen) {
-    await ctx.reply(text);
+    await ctx.reply(text, options);
     return;
   }
   const chunks = [];
@@ -44,8 +76,8 @@ async function sendLong(ctx, text) {
     remaining = remaining.substring(splitAt).trimStart();
   }
   for (const chunk of chunks) {
-    await ctx.reply(chunk);
+    await ctx.reply(chunk, options);
   }
 }
 
-module.exports = { cleanOutput, sendLong };
+module.exports = { cleanOutput, sendLong, escapeHtml, mdToHtml };
