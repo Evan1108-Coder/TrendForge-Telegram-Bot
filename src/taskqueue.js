@@ -2,14 +2,10 @@
 //
 // Behaviour (matches how a person juggles requests):
 //   * IDLE  → run the task right away, no chatter.
-//   * BUSY  → the running task is NEVER interrupted. The new task is classified:
-//       - queue   (default): handled right after the current task finishes.
-//       - preempt: the user wants a quick answer NOW ("quick…", "do this first",
-//                  "answer me now") → run it immediately, in parallel, while the
-//                  long task keeps going. Nothing is stopped.
-//       - cancel : the user changed their mind → drop everything still waiting in
-//                  the queue. The in-flight task is left to finish (we don't kill
-//                  work midway).
+//   * BUSY  → the running task is NEVER interrupted. The new message is handled
+//              conversationally: acknowledgements and status questions get an
+//              immediate answer; new tasks are refused until the current task
+//              finishes unless the user explicitly asks to stop/cancel.
 //   * Every busy decision is ACKNOWLEDGED so the user always knows what happened.
 //
 // The module is deliberately free of any Telegram/grammY coupling so it can be
@@ -18,21 +14,24 @@
 // Obvious "do it now" phrasings — a free, deterministic fast-path so we don't
 // spend an LLM call on the clear cases.
 const PREEMPT_RE = /\b(quick(ly)?|real\s?quick|right\s?now|right\s?away|immediately|urgent(ly)?|asap|do\s+this\s+first|first\s+(though|please)?|answer\s+(me\s+)?(this\s+)?now|just\s+answer|quick\s+(question|one|thing)|one\s+quick|before\s+that)\b/i;
+const STATUS_RE = /\b(status|progress|what(?:'|’)?s happening|what are you doing|current task|are you done|how(?:'|’)?s it going|where are we|state|update)\b/i;
+const ACK_RE = /\b(ok|okay|got it|cool|thanks|thank you|sounds good|working on that|fine|great)\b/i;
 
 // Obvious "never mind" phrasings.
 const CANCEL_RE = /\b(cancel|abort|never\s?mind|forget\s+it|stop\s+that|drop\s+it|scratch\s+that|disregard)\b/i;
 
-// Returns 'preempt' | 'cancel' on a confident keyword hit, otherwise null
-// (caller falls back to the LLM classifier, then to the 'queue' default).
+// Returns 'status' | 'ack' | 'cancel' | 'queue' on a confident keyword hit.
 function classifyByKeyword(text) {
   const t = (text || '').toString();
   if (CANCEL_RE.test(t)) return 'cancel';
-  if (PREEMPT_RE.test(t)) return 'preempt';
+  if (STATUS_RE.test(t) || (/\?/.test(t) && /\b(task|doing|progress|done|finished|working)\b/i.test(t))) return 'status';
+  if (t.length <= 80 && ACK_RE.test(t) && !/[?]/.test(t)) return 'ack';
+  if (PREEMPT_RE.test(t)) return 'queue';
   return null;
 }
 
 function createTaskQueue(deps = {}) {
-  const classifyLLM = deps.classify || null; // async ({text, current}) => 'queue'|'preempt'|'cancel'
+  const classifyLLM = deps.classify || null; // async ({text, current}) => 'queue'|'status'|'ack'|'cancel'
   const onAck = deps.onAck || (async () => {}); // async ({chatId, intent, task, current, dropped}) => void
   const log = deps.log || (() => {});
   const states = new Map();
@@ -52,15 +51,12 @@ function createTaskQueue(deps = {}) {
   }
 
   async function classify(task, current) {
-    // Free deterministic path first.
     const kw = classifyByKeyword(task.text);
     if (kw) return kw;
-    // Nuanced cases: ask the injected LLM classifier if present. Any failure or
-    // unrecognised answer falls back to the safe default — queue, never stop.
     if (classifyLLM) {
       try {
         const out = await classifyLLM({ text: task.text, current: current ? current.label : null });
-        if (out === 'preempt' || out === 'cancel' || out === 'queue') return out;
+        if (out === 'status' || out === 'ack' || out === 'cancel' || out === 'queue') return out;
       } catch (e) {
         log('classify LLM failed: ' + e.message);
       }
@@ -137,14 +133,9 @@ function createTaskQueue(deps = {}) {
 
     await safeAck({ chatId, intent, task, current });
 
-    if (intent === 'preempt') {
-      runImmediate(chatId, task); // parallel, fire-and-forget
-      return 'preempt';
-    }
-
-    s.queue.push(task);
-    drain(chatId); // ensure the lane is running for the newly-queued task
-    return 'queue';
+    // Busy chat is conversational only. Do not start/queue a second task unless
+    // the first one is done; the ack tells the user how to ask for status or stop.
+    return intent;
   }
 
   function inspect(chatId) {
@@ -155,4 +146,4 @@ function createTaskQueue(deps = {}) {
   return { submit, isBusy, inspect, classify, _states: states };
 }
 
-module.exports = { createTaskQueue, classifyByKeyword, PREEMPT_RE, CANCEL_RE };
+module.exports = { createTaskQueue, classifyByKeyword, PREEMPT_RE, STATUS_RE, ACK_RE, CANCEL_RE };

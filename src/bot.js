@@ -196,15 +196,17 @@ function createBot(token) {
     const sys =
       'You triage incoming messages for an assistant that is CURRENTLY BUSY with another task. ' +
       'Reply with exactly ONE word:\n' +
-      'QUEUE = handle it after the current task finishes (the default for normal requests),\n' +
-      'PREEMPT = the user wants a quick answer right now or asked to do it first,\n' +
-      'CANCEL = the user wants to cancel what they previously asked for.\n' +
+      'STATUS = the user asks what is happening or asks for progress/current task state,\n' +
+      'ACK = the user only acknowledges (got it/ok/thanks),\n' +
+      'CANCEL = the user wants to stop/cancel what they previously asked for,\n' +
+      'QUEUE = the user is asking for a new task or anything else.\n' +
       'Reply with ONLY the single word.';
     const usr = `Current task: ${current || 'a task in progress'}\nNew message: "${(text || '').slice(0, 300)}"\nOne word:`;
     try {
       const out = await chat(model, [{ role: 'system', content: sys }, { role: 'user', content: usr }]);
       const w = (out || '').toUpperCase();
-      if (w.includes('PREEMPT')) return 'preempt';
+      if (w.includes('STATUS')) return 'status';
+      if (w.includes('ACK')) return 'ack';
       if (w.includes('CANCEL')) return 'cancel';
       return 'queue';
     } catch (e) {
@@ -218,9 +220,11 @@ function createBot(token) {
     if (!ctx) return;
     const curLabel = current && current.label ? current.label : "what I'm working on";
     try {
-      if (intent === 'preempt') {
-        const other = curLabel === "what I'm working on" ? 'the other task' : curLabel;
-        await ctx.reply(`⚡ Doing that right now — I'll keep ${other} running too.`);
+      if (intent === 'status') {
+        const state = taskQueue.inspect(ctx.chat.id);
+        await ctx.reply(`I'm currently working on ${curLabel}. Queued tasks: ${state.queued}. Ask “stop” if you want me to stop before starting something else.`);
+      } else if (intent === 'ack') {
+        await ctx.reply(`Got it — I'm still working on ${curLabel}.`);
       } else if (intent === 'cancel') {
         await ctx.reply(
           dropped > 0
@@ -228,7 +232,7 @@ function createBot(token) {
             : "🗑️ Nothing was waiting in the queue to cancel — and I won't cut off what's already running."
         );
       } else {
-        await ctx.reply(`👍 Got it — I'll get to that right after I finish ${curLabel}.`);
+        await ctx.reply(`I'm still working on ${curLabel}, so I can't start a new task yet. Ask “status” for the current state, or say “stop/cancel” if you want me to stop this task first.`);
       }
     } catch (e) {
       console.error('[Queue] ack failed:', e.message);
