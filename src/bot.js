@@ -23,6 +23,7 @@ const { fetchDevToByInterests } = require('./scrapers/devto');
 const { withRetry } = require('./utils/retry');
 const { cleanOutput, sendLong } = require('./utils/format');
 const { formatTelegramReply, formatEvidence } = require('./utils/tgformat');
+const { isSelfContextQuery, selfContextText, renderSelfContext } = require('./self-context');
 const { classifyFile, downloadTelegramFile, extractText, getImageBase64, getMimeType, getSupportedExtensions } = require('./files');
 const { classifyComplexity, StagedStatus, STAGES, openingStage } = require('./utils/staged');
 const { runWithDeadline, DeadlineError } = require('./utils/guard');
@@ -650,6 +651,10 @@ function createBot(token) {
     const chatId = ctx.chat.id;
     const text = buildMessageContext(ctx);
 
+    if (isSelfContextQuery(text)) {
+      return void sendLong(ctx, renderSelfContext(chatId), { parse_mode: 'HTML', disable_web_page_preview: true });
+    }
+
     // Quick watch-management phrases handled inline (no model, no queue).
     const raw = (ctx.message.text || '').trim();
     if (/^(watches|show watches|list watches|what am i watching)$/i.test(raw)) {
@@ -825,7 +830,7 @@ function createBot(token) {
 
     const history = getHistory(chatId);
     const recentEvidence = evidenceSummary(chatId);
-    const systemPrompt = buildSystemPrompt(prefs, allModels) + '\nUse recent recorded actions as evidence for follow-up/status questions. Do not invent tool results, stats, or provider state; say what was actually checked.\nRecent recorded actions:\n' + recentEvidence;
+    const systemPrompt = buildSystemPrompt(prefs, allModels) + '\nBot runtime self-context (use this for ambiguous self-referential questions like latest version/who are you/what can you do):\n' + selfContextText(chatId) + '\nUse recent recorded actions as evidence for follow-up/status questions. Do not invent tool results, stats, or provider state; say what was actually checked.\nRecent recorded actions:\n' + recentEvidence;
 
     // Feature 1 — complexity-gated status. A hello / thanks / short question gets
     // an instant reply with NO status line; a real request gets a single
