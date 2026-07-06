@@ -41,10 +41,10 @@ function classifyComplexity(text, hints = {}) {
   if (!t) return { complex: false, reason: 'empty' };
   if (GREETING_RE.test(t)) return { complex: false, reason: 'greeting' };
   if (THANKS_RE.test(t)) return { complex: false, reason: 'acknowledgement' };
+  if (looksLikeShortQuestion(t) && !COMPLEX_RE.test(t)) return { complex: false, reason: 'short question' };
   if (COMPLEX_RE.test(t)) return { complex: true, reason: 'trend/report request' };
   if (t.length > 220) return { complex: true, reason: 'long request' };
-  if (looksLikeShortQuestion(t)) return { complex: false, reason: 'short question' };
-  return { complex: true, reason: 'unclassified — showing progress to be safe' };
+  return { complex: false, reason: 'no concrete TrendForge action detected' };
 }
 
 // Owns exactly one Telegram message and edits it in place (plain text). Resilient
@@ -146,10 +146,20 @@ function stripTags(s) {
   return String(s).replace(/<[^>]+>/g, '');
 }
 
+function openingStage(text) {
+  const t = String(text || '');
+  if (/\b(report|digest|write|summari[sz]e)\b/i.test(t)) return STAGES.writing;
+  if (/\b(scrape|fetch|trend|trending|source|url|http)\b/i.test(t)) return STAGES.scraping;
+  if (/\b(analy[sz]e|compare|research|idea|ideas)\b/i.test(t)) return STAGES.analyzing;
+  if (/\b(schedule|remind|every|daily|weekly|watch|monitor|track)\b/i.test(t)) return STAGES.planning;
+  const variants = [STAGES.thinking, STAGES.planning, STAGES.working];
+  return variants[t.length % variants.length];
+}
+
 function maybeStaged(ctx, text, hints = {}) {
   const { complex, reason } = classifyComplexity(text, hints);
   if (!complex) return { staged: null, complex: false, reason };
   return { staged: new StagedStatus(ctx, hints), complex: true, reason };
 }
 
-module.exports = { STAGES, classifyComplexity, StagedStatus, maybeStaged };
+module.exports = { STAGES, classifyComplexity, StagedStatus, maybeStaged, openingStage };

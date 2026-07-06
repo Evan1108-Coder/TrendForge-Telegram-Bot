@@ -23,7 +23,7 @@ const { fetchDevToByInterests } = require('./scrapers/devto');
 const { withRetry } = require('./utils/retry');
 const { cleanOutput, sendLong } = require('./utils/format');
 const { classifyFile, downloadTelegramFile, extractText, getImageBase64, getMimeType, getSupportedExtensions } = require('./files');
-const { classifyComplexity, StagedStatus, STAGES } = require('./utils/staged');
+const { classifyComplexity, StagedStatus, STAGES, openingStage } = require('./utils/staged');
 const { runWithDeadline, DeadlineError } = require('./utils/guard');
 const { remember, ack: variedAck, evidenceSummary } = require('./utils/actionlog');
 const { getWatchManager, parseWatchIntent } = require('./watch-setup');
@@ -831,7 +831,7 @@ function createBot(token) {
     // edit-in-place trail (thinking → scraping → analysing → done).
     const { complex } = classifyComplexity(combinedText);
     const staged = complex ? new StagedStatus(ctx) : null;
-    if (staged) await staged.stage(STAGES.thinking);
+    if (staged) await staged.stage(openingStage(combinedText));
 
     // Feature 2 — hard wall-clock deadline around each model call. A hung
     // provider can never freeze the chat; it ends as a friendly "took too long".
