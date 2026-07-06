@@ -25,6 +25,7 @@ const { cleanOutput, sendLong } = require('./utils/format');
 const { classifyFile, downloadTelegramFile, extractText, getImageBase64, getMimeType, getSupportedExtensions } = require('./files');
 const { classifyComplexity, StagedStatus, STAGES } = require('./utils/staged');
 const { runWithDeadline, DeadlineError } = require('./utils/guard');
+const { remember, ack: variedAck, evidenceSummary } = require('./utils/actionlog');
 const { getWatchManager, parseWatchIntent } = require('./watch-setup');
 const { InlineKeyboard } = require('grammy');
 
@@ -224,7 +225,7 @@ function createBot(token) {
         const state = taskQueue.inspect(ctx.chat.id);
         await ctx.reply(`I'm currently working on ${curLabel}. Queued tasks: ${state.queued}. Ask “stop” if you want me to stop before starting something else.`);
       } else if (intent === 'ack') {
-        await ctx.reply(`Got it — I'm still working on ${curLabel}.`);
+        await ctx.reply(`${variedAck(task.text)} Still on ${curLabel}.`);
       } else if (intent === 'cancel') {
         await ctx.reply(
           dropped > 0
@@ -822,7 +823,8 @@ function createBot(token) {
     }
 
     const history = getHistory(chatId);
-    const systemPrompt = buildSystemPrompt(prefs, allModels);
+    const recentEvidence = evidenceSummary(chatId);
+    const systemPrompt = buildSystemPrompt(prefs, allModels) + '\nUse recent recorded actions as evidence for follow-up/status questions. Do not invent tool results, stats, or provider state; say what was actually checked.\nRecent recorded actions:\n' + recentEvidence;
 
     // Feature 1 — complexity-gated status. A hello / thanks / short question gets
     // an instant reply with NO status line; a real request gets a single
@@ -863,6 +865,7 @@ function createBot(token) {
           ]);
 
           const cleaned = cleanOutput(phase2Response) || 'Here are the results, but I had trouble formatting them.';
+          remember(chatId, { action: 'executed requested actions', evidence: formatActionResults(results).slice(0, 400), result: cleaned.slice(0, 200) });
           addToHistory(chatId, 'assistant', cleaned);
           if (staged) await staged.done();
           await sendLong(ctx, cleaned);
@@ -871,6 +874,7 @@ function createBot(token) {
           if (!response) {
             response = generateConfirmation(results);
           }
+          remember(chatId, { action: 'responded without external action', evidence: combinedText.slice(0, 160), result: response.slice(0, 200) });
           addToHistory(chatId, 'assistant', response);
           if (staged) await staged.done();
           await sendLong(ctx, response);
