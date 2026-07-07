@@ -3,6 +3,8 @@ const { generateDailyReport } = require('./report');
 const { loadPreferences } = require('./preferences');
 const { startAllSchedules, restartAllSchedules, stopAllSchedules } = require('./schedules');
 const { sendReportHTML } = require('./render');
+const { cleanOutput } = require('./utils/format');
+const { remember } = require('./utils/actionlog');
 const { handleError } = require('./errors');
 const { checkForUpdate, formatUpdateNotice } = require('./update');
 
@@ -66,6 +68,8 @@ async function sendReport(bot) {
   try {
     const report = await generateDailyReport();
     await sendReportHTML(bot.api, chatId, report);
+    const plainReport = cleanOutput(report).slice(0, 8000);
+    remember(chatId, { action: 'sent scheduled daily trend report', evidence: plainReport.slice(0, 1200), result: 'Scheduled report sent; use it as context for follow-up questions.', cost: 'not reported by provider' });
     console.log('[CRON] Default report sent successfully.');
   } catch (err) {
     console.error('[CRON] Failed to send report:', err.message);

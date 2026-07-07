@@ -2,6 +2,8 @@ const cron = require('node-cron');
 const fs = require('fs');
 const path = require('path');
 const { sendReportHTML } = require('./render');
+const { cleanOutput } = require('./utils/format');
+const { remember } = require('./utils/actionlog');
 
 const SCHEDULES_FILE = path.join(__dirname, '..', 'schedules.json');
 const activeJobs = new Map();
@@ -112,9 +114,12 @@ async function executeScheduledAction(name, config) {
       }
       const report = await reportGeneratorFn();
       await sendReportHTML(botRef.api, chatId, report);
+      const plainReport = cleanOutput(report).slice(0, 8000);
+      remember(chatId, { action: `sent scheduled report: ${name}`, evidence: plainReport.slice(0, 1200), result: 'Scheduled report sent; use it as context for follow-up questions.', cost: 'not reported by provider' });
     } else if (config.type === 'message') {
       const msg = config.message || `Scheduled: ${config.description}`;
       await sendLongDirect(chatId, msg);
+      remember(chatId, { action: `sent scheduled message: ${name}`, evidence: msg.slice(0, 1200), result: 'Scheduled message sent; use it as context for follow-up questions.', cost: 'none' });
     }
   } catch (e) {
     console.error(`[Schedules] Error in "${name}":`, e.message);

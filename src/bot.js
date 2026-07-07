@@ -455,6 +455,9 @@ function createBot(token) {
         try {
           const report = await generateDailyReport();
           await sendReportHTML(bot.api, ctx.chat.id, report);
+          const plainReport = cleanOutput(report).slice(0, 8000);
+          addToHistory(chatId, 'assistant', `[TrendForge generated report]\n${plainReport}`);
+          remember(chatId, { action: 'generated trend report', evidence: plainReport.slice(0, 1200), result: 'Report sent to this chat; use it as context for follow-up questions such as “So it is all skills?”', version: VERSION, cost: 'not reported by provider' });
         } catch (e) {
           console.error('[Bot] /report failed:', e.message);
           const explanation = await handleError({ err: e, where: 'generating your trend report' });
