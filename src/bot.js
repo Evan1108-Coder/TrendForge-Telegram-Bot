@@ -112,6 +112,19 @@ function createBot(token) {
   const activeReminders = new Map();
   let updateInProgress = false;
 
+  bot.use(async (ctx, next) => {
+    const originalReply = ctx.reply.bind(ctx);
+    ctx.reply = async (text, options) => {
+      const plain = cleanOutput(String(text || '')).slice(0, 1200);
+      if (plain && ctx.chat?.id) {
+        addToHistory(ctx.chat.id, 'assistant', plain);
+        remember(ctx.chat.id, { action: 'sent bot reply', evidence: plain, result: 'Recorded outgoing structured/command response for follow-up context.', version: VERSION, cost: 'none' });
+      }
+      return originalReply(text, options);
+    };
+    return next();
+  });
+
   // ---- Durable reminders ---------------------------------------------------
   // Reminders are persisted to disk (reminders.json) so they survive a restart.
   // armReminder schedules the in-memory timer for one stored reminder; when it
