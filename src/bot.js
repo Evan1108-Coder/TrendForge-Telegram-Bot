@@ -375,6 +375,7 @@ function createBot(token) {
       }
 
       if (!info.available) {
+        remember(ctx.chat.id, { action: 'checked /update command', evidence: `local=${info.localVersion || info.local || 'unknown'} remote=${info.remoteVersion || info.remote || 'unknown'}`, result: 'Already on latest version; no update applied.', version: VERSION, cost: 'none' });
         await ctx.reply(`✅ Already on the latest version${info.localVersion ? ` (v${info.localVersion})` : ''}. Nothing to update.`);
         return;
       }
@@ -385,6 +386,7 @@ function createBot(token) {
       const changes = info.changelog && info.changelog.length
         ? '\n\nWhat\'s changing:\n' + info.changelog.slice(0, 8).map((c) => `• ${c}`).join('\n')
         : '';
+      remember(ctx.chat.id, { action: 'found available /update', evidence: `${verLine}; changelog=${(info.changelog || []).slice(0, 8).join(' | ')}`, result: 'Applying update with health check.', version: VERSION, cost: 'none' });
       await ctx.reply(`⬇️ Update found (${verLine}). Pulling, health-checking and applying now…${changes}`);
 
       // applyUpdate never throws; it returns a structured, already-friendly
@@ -392,6 +394,7 @@ function createBot(token) {
       const result = applyUpdate();
 
       if (!result.ok) {
+        remember(ctx.chat.id, { action: 'failed /update command', evidence: `stage=${result.stage || 'unknown'} message=${result.message || 'unknown'}`, result: result.rolledBack ? 'Update failed and rolled back.' : 'Update failed before completion.', version: VERSION, cost: 'none' });
         console.error(`[Bot] /update failed at ${result.stage}:`, result.message);
         const rolled = result.rolledBack ? ' Your bot is still running the previous working version.' : '';
         await sendLong(ctx, `⚠️ Update could not be applied (${result.stage}): ${result.message}${rolled}`);
@@ -399,6 +402,7 @@ function createBot(token) {
       }
 
       if (!result.updated) {
+        remember(ctx.chat.id, { action: 'completed /update command', evidence: 'applyUpdate returned no changes', result: 'Already up to date.', version: VERSION, cost: 'none' });
         await ctx.reply('✅ Already up to date.');
         return;
       }
@@ -429,6 +433,7 @@ function createBot(token) {
           : `\n\n⚠️ Data integrity check FAILED for: ${di.mismatches.map((m) => m.file).join(', ')}`)
         : '';
 
+      remember(ctx.chat.id, { action: 'completed /update command', evidence: `prev=${result.prevHead || 'unknown'} new=${result.newHead || 'unknown'} files=${(result.filesChanged || []).map(f => `${f.status} ${f.file}`).join(', ')}`, result: `Updated${result.remoteVersion ? ` to ${result.remoteVersion}` : ''}; restarting.`, version: VERSION, cost: 'none' });
       await sendLong(ctx, `✅ Updated${result.remoteVersion ? ` to v${result.remoteVersion}` : ''} and health check passed. ${dataNote}${filesPart}${commitsPart}${integrityPart}\n\n♻️ Restarting now to run the new version…`);
 
       // Let Telegram flush the reply, then let pm2 respawn us on the new code.
