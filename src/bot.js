@@ -1210,7 +1210,7 @@ function createBot(token) {
 FILE ANALYSIS:
 Users can send files directly in Telegram. You'll receive their content inline. Supported types:
 - Text/markup: .txt, .md, .csv, .json, .html
-- Documents: .pdf, .docx
+- Documents: .pdf, .rtf
 - Images: .png, .jpg, .jpeg, .avif (requires vision-capable model)
 When you receive file content, analyze it thoroughly and respond to the user's question about it.
 

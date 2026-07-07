@@ -5,7 +5,7 @@ const pdfParse = require('pdf-parse');
 const mammoth = require('mammoth');
 
 const SUPPORTED_TEXT = new Set(['.txt', '.md', '.csv', '.json', '.html']);
-const SUPPORTED_DOCS = new Set(['.pdf', '.docx']);
+const SUPPORTED_DOCS = new Set(['.pdf', '.rtf']);
 const SUPPORTED_IMAGES = new Set(['.png', '.jpg', '.jpeg', '.avif']);
 
 const MIME_MAP = {
@@ -46,17 +46,25 @@ async function extractText(buffer, fileName) {
     return text.substring(0, 15000);
   }
 
+  if (ext === '.rtf') {
+    return stripRtf(buffer.toString('utf-8')).substring(0, 15000);
+  }
+
   if (ext === '.pdf') {
     const data = await pdfParse(buffer);
     return data.text.substring(0, 15000);
   }
 
-  if (ext === '.docx') {
-    const result = await mammoth.extractRawText({ buffer });
-    return result.value.substring(0, 15000);
-  }
-
   return null;
+}
+
+function stripRtf(raw) {
+  return String(raw)
+    .replace(/\\'[0-9a-fA-F]{2}/g, ' ')
+    .replace(/\\[a-z]+\d* ?/gi, ' ')
+    .replace(/[{}]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function getImageBase64(buffer) {
@@ -78,4 +86,5 @@ module.exports = {
   SUPPORTED_TEXT,
   SUPPORTED_DOCS,
   SUPPORTED_IMAGES,
+  stripRtf,
 };
