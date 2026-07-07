@@ -23,6 +23,7 @@ const { fetchDevToByInterests } = require('./scrapers/devto');
 const { withRetry } = require('./utils/retry');
 const { cleanOutput, sendLong } = require('./utils/format');
 const { formatTelegramReply, formatEvidence } = require('./utils/tgformat');
+const { languagePolicy } = require('./utils/language');
 const { isSelfContextQuery, selfContextText, renderSelfContext } = require('./self-context');
 const { classifyFile, downloadTelegramFile, extractText, getImageBase64, getMimeType, getSupportedExtensions } = require('./files');
 const { classifyComplexity, StagedStatus, STAGES, openingStage } = require('./utils/staged');
@@ -830,7 +831,7 @@ function createBot(token) {
 
     const history = getHistory(chatId);
     const recentEvidence = evidenceSummary(chatId);
-    const systemPrompt = buildSystemPrompt(prefs, allModels) + '\nBot runtime self-context (use this for ambiguous self-referential questions like latest version/who are you/what can you do):\n' + selfContextText(chatId) + '\nUse recent recorded actions as evidence for follow-up/status questions. Do not invent tool results, stats, or provider state; say what was actually checked.\nRecent recorded actions:\n' + recentEvidence;
+    const systemPrompt = buildSystemPrompt(prefs, allModels) + '\n' + languagePolicy() + '\nBot runtime self-context (use this for ambiguous self-referential questions like latest version/who are you/what can you do):\n' + selfContextText(chatId) + '\nUse recent recorded actions as evidence for follow-up/status questions. Do not invent tool results, stats, or provider state; say what was actually checked.\nRecent recorded actions:\n' + recentEvidence;
 
     // Feature 1 — complexity-gated status. A hello / thanks / short question gets
     // an instant reply with NO status line; a real request gets a single

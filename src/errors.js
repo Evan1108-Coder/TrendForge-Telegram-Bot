@@ -96,6 +96,8 @@ function buildErrorContext({ err, where, extra } = {}, deps = {}) {
   };
 }
 
+const { languagePolicy } = require('./utils/language');
+
 const EXPLAINER_SYSTEM_PROMPT =
   'You are TrendForge\'s error explainer. Something went wrong and you are given a JSON snapshot of ' +
   'EXACTLY what happened and the user\'s current state. Write a SHORT message (2-5 sentences) directly ' +
@@ -104,7 +106,7 @@ const EXPLAINER_SYSTEM_PROMPT =
   'name the env var they need to set AND suggest a specific model that is ready right now (from ' +
   'availableModels). For network/rate-limit/provider issues, say what it likely is and that retrying or ' +
   'switching model may help. Be warm and helpful, never robotic. Plain text only: no markdown, no HTML, ' +
-  'no code fences, no asterisks. Never reveal or ask for API key values. Do not invent facts beyond the snapshot.';
+  'no code fences, no asterisks. Never reveal or ask for API key values. Do not invent facts beyond the snapshot. ' + languagePolicy();
 
 // Deterministic fallback used ONLY when the AI cannot run.
 function hardFallback(context) {

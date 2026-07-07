@@ -7,6 +7,7 @@ const { chat, getAvailableModels } = require('./llm/providers');
 const { loadPreferences } = require('./preferences');
 const { memoriesForPrompt } = require('./memory');
 const { withRetry } = require('./utils/retry');
+const { languagePolicy } = require('./utils/language');
 const {
   buildCandidates,
   parseModelJson,
@@ -35,6 +36,7 @@ function buildPrompt(prefs, candidateList, memText) {
     ? `\nWHAT THE READER ASKED YOU TO REMEMBER (use to personalize ranking & framing; don't quote verbatim)\n${memText}\n`
     : '';
   return `You are TrendForge, a sharp daily tech-trend curator writing a SHORT briefing for one reader.
+${languagePolicy()}
 
 READER PROFILE
 - Interests: ${prefs.interests.join(', ')}
