@@ -25,7 +25,7 @@ const { cleanOutput, sendLong } = require('./utils/format');
 const { formatTelegramReply, formatEvidence } = require('./utils/tgformat');
 const { languagePolicy } = require('./utils/language');
 const { isSelfContextQuery, selfContextText, renderSelfContext } = require('./self-context');
-const { classifyFile, downloadTelegramFile, extractText, getImageBase64, getMimeType, getSupportedExtensions } = require('./files');
+const { classifyFile, downloadTelegramFile, extractText, getImageBase64, getMimeType, getSupportedExtensions, voiceCapabilityMessage, unsupportedAttachmentMessage } = require('./files');
 const { classifyComplexity, StagedStatus, STAGES, openingStage } = require('./utils/staged');
 const { runWithDeadline, DeadlineError } = require('./utils/guard');
 const { remember, ack: variedAck, evidenceSummary } = require('./utils/actionlog');
@@ -703,6 +703,16 @@ function createBot(token) {
       text,
       run: () => processTextMessage(ctx, chatId, text),
     });
+  });
+
+  bot.on('message:voice', (ctx) => ctx.reply(voiceCapabilityMessage()));
+
+  bot.on(['message:audio', 'message:video', 'message:video_note', 'message:animation'], (ctx) => {
+    const kind = ctx.message.audio ? 'audio file'
+      : ctx.message.video ? 'video'
+        : ctx.message.video_note ? 'video message'
+          : 'animation';
+    return ctx.reply(unsupportedAttachmentMessage(kind));
   });
 
   bot.on(['message:document', 'message:photo'], async (ctx) => {

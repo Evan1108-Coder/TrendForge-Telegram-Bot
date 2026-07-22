@@ -76,6 +76,14 @@ function getMimeType(fileName) {
   return MIME_MAP[ext] || 'image/png';
 }
 
+function voiceCapabilityMessage() {
+  return 'I received your voice message, but TrendForge cannot transcribe audio yet. Please send the request as text; I won’t guess at audio I cannot hear.';
+}
+
+function unsupportedAttachmentMessage(kind = 'attachment') {
+  return `I received the ${kind}, but TrendForge cannot process that attachment type yet. Please send text or one of these supported uploads: ${getSupportedExtensions().join(', ')}.`;
+}
+
 module.exports = {
   getSupportedExtensions,
   classifyFile,
@@ -83,6 +91,8 @@ module.exports = {
   extractText,
   getImageBase64,
   getMimeType,
+  voiceCapabilityMessage,
+  unsupportedAttachmentMessage,
   SUPPORTED_TEXT,
   SUPPORTED_DOCS,
   SUPPORTED_IMAGES,

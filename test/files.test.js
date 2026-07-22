@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { classifyFile, getSupportedExtensions, extractText, getMimeType, stripRtf } = require('../src/files');
+const { classifyFile, getSupportedExtensions, extractText, getMimeType, stripRtf, voiceCapabilityMessage, unsupportedAttachmentMessage } = require('../src/files');
 
 const fixtures = path.join(__dirname, 'fixtures', 'uploads');
 const REQUIRED = ['.txt', '.md', '.csv', '.json', '.html', '.pdf', '.rtf', '.png', '.jpg', '.jpeg', '.avif'];
@@ -28,4 +28,11 @@ test('image mime types are explicit', () => {
   assert.equal(getMimeType('a.jpg'), 'image/jpeg');
   assert.equal(getMimeType('a.jpeg'), 'image/jpeg');
   assert.equal(getMimeType('a.avif'), 'image/avif');
+});
+
+test('voice and unsupported attachments get honest capability messages', () => {
+  assert.match(voiceCapabilityMessage(), /cannot transcribe audio yet/i);
+  assert.match(voiceCapabilityMessage(), /send the request as text/i);
+  assert.match(unsupportedAttachmentMessage('video'), /cannot process that attachment type yet/i);
+  assert.match(unsupportedAttachmentMessage('video'), /supported uploads/i);
 });
